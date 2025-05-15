@@ -29,7 +29,8 @@ def make_index_dict(label_csv):
         csv_reader = csv.DictReader(f)
         line_count = 0
         for row in csv_reader:
-            index_lookup[row['mid']] = row['index']
+            # index_lookup[row['mid']] = row['index']
+            index_lookup[row['id']] = int(row['id'])
             line_count += 1
     return index_lookup
 
@@ -39,7 +40,8 @@ def make_name_dict(label_csv):
         csv_reader = csv.DictReader(f)
         line_count = 0
         for row in csv_reader:
-            name_lookup[row['index']] = row['display_name']
+            #name_lookup[row['index']] = row['display_name']
+            name_lookup[row['id']] = row['name']
             line_count += 1
     return name_lookup
 
@@ -297,3 +299,15 @@ class AudiosetDataset(Dataset):
 
     def __len__(self):
         return self.num_samples
+    
+if __name__ == '__main__':
+    # test the dataloader
+    audio_conf = {'num_mel_bins': 128, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
+              'noise':True, 'label_smooth': 0, 'im_res': 224}
+    dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700_val.json', audio_conf, label_csv='data/info/k700_class.csv')
+    print('dataset length is {:d}'.format(len(dataset)))
+    for i in range(10):
+        fbank, image, label_indices = dataset[i]
+        print(fbank.shape)
+        print(image.shape)
+        print(label_indices.shape)

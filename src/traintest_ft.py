@@ -17,14 +17,32 @@ import numpy as np
 import pickle
 from torch.cuda.amp import autocast,GradScaler
 
-def train(audio_model, train_loader, test_loader, args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
+import wandb
+
+def calculate_grad_norm(model):
+    total_norm = 0
+    parameters = [p for p in model.parameters() if p.grad is not None and p.requires_grad]
+    for p in parameters:
+        param_norm = p.grad.detach().data.norm(2)
+        total_norm += param_norm.item() ** 2
+    total_norm = total_norm ** 0.5
+
+    return total_norm
+
+
+def train(audio_model, train_loader, test_loader, args, local_rank):
+    device = torch.device(f'cuda:{local_rank}')
+    audio_model.to(device)
+    audio_model = DDP(audio_model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
     print('running on ' + str(device))
     torch.set_grad_enabled(True)
 
     batch_time, per_sample_time, data_time, per_sample_data_time, loss_meter, per_sample_dnn_time = AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter()
     progress = []
     best_epoch, best_mAP, best_acc = 0, -np.inf, -np.inf
+    best_acc = 0
     global_step, epoch = 0, 0
     start_time = time.time()
     exp_dir = args.exp_dir
@@ -34,10 +52,6 @@ def train(audio_model, train_loader, test_loader, args):
         with open("%s/progress.pkl" % exp_dir, "wb") as f:
             pickle.dump(progress, f)
 
-    if not isinstance(audio_model, nn.DataParallel):
-        audio_model = nn.DataParallel(audio_model)
-
-    audio_model = audio_model.to(device)
 
     # possible mlp layer name list, mlp layers are newly initialized layers in the finetuning stage (i.e., not pretrained) and should use a larger lr during finetuning
     mlp_list = ['mlp_head.0.weight', 'mlp_head.0.bias', 'mlp_head.1.weight', 'mlp_head.1.bias',
@@ -91,11 +105,14 @@ def train(audio_model, train_loader, test_loader, args):
 
     print("current #steps=%s, #epochs=%s" % (global_step, epoch))
     print("start training...")
-    result = np.zeros([args.n_epochs, 4])
+
     audio_model.train()
     while epoch < args.n_epochs + 1:
+        train_loader.sampler.set_epoch(epoch)
+        test_loader.sampler.set_epoch(epoch)
         begin_time = time.time()
         end_time = time.time()
+        print(train_loader.sampler)
         audio_model.train()
         print('---------------')
         print(datetime.datetime.now())
@@ -114,12 +131,22 @@ def train(audio_model, train_loader, test_loader, args):
             with autocast():
                 audio_output = audio_model(a_input, v_input, args.ftmode)
                 loss = loss_fn(audio_output, labels)
-
+            
             optimizer.zero_grad()
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
+            grad_norm = calculate_grad_norm(audio_model)
+            if args.use_wandb and local_rank == 0:
+                wandb.log({
+                    'train CE_loss': loss.item(),
+                    'grad_norm':grad_norm,
+                    'iters': (epoch - 1) * len(train_loader) + i,
+                    'epoch': epoch,
+                    'lr': optimizer.param_groups[0]['lr'],
+                    'mlp_lr': optimizer.param_groups[1]['lr'],
+                })
             loss_meter.update(loss.item(), B)
             batch_time.update(time.time() - end_time)
             per_sample_time.update((time.time() - end_time)/a_input.shape[0])
@@ -145,30 +172,28 @@ def train(audio_model, train_loader, test_loader, args):
             global_step += 1
 
         print('start validation')
+        acc, valid_loss =  validate(audio_model, test_loader, args, local_rank=local_rank)
+        # stats, valid_loss = validate(audio_model, test_loader, args, local_rank)
 
-        stats, valid_loss = validate(audio_model, test_loader, args)
+        # mAP = np.mean([stat['AP'] for stat in stats])
+        # mAUC = np.mean([stat['auc'] for stat in stats])
+        # acc = stats[0]['acc'] # this is just a trick, acc of each class entry is the same, which is the accuracy of all classes, not class-wise accuracy
 
-        mAP = np.mean([stat['AP'] for stat in stats])
-        mAUC = np.mean([stat['auc'] for stat in stats])
-        acc = stats[0]['acc'] # this is just a trick, acc of each class entry is the same, which is the accuracy of all classes, not class-wise accuracy
-
-        if main_metrics == 'mAP':
-            print("mAP: {:.6f}".format(mAP))
-        else:
-            print("acc: {:.6f}".format(acc))
-        print("AUC: {:.6f}".format(mAUC))
-        print("d_prime: {:.6f}".format(d_prime(mAUC)))
+        # if main_metrics == 'mAP':
+        #     print("mAP: {:.6f}".format(mAP))
+        # else:
+        #     print("acc: {:.6f}".format(acc))
+        print("acc: {:.6f}".format(acc))
+        # print("AUC: {:.6f}".format(mAUC))
+        # print("d_prime: {:.6f}".format(d_prime(mAUC)))
         print("train_loss: {:.6f}".format(loss_meter.avg))
         print("valid_loss: {:.6f}".format(valid_loss))
-
-        result[epoch-1, :] = [acc, mAP, mAUC, optimizer.param_groups[0]['lr']]
-        np.savetxt(exp_dir + '/result.csv', result, delimiter=',')
         print('validation finished')
 
-        if mAP > best_mAP:
-            best_mAP = mAP
-            if main_metrics == 'mAP':
-                best_epoch = epoch
+        # if mAP > best_mAP:
+        #     best_mAP = mAP
+        #     if main_metrics == 'mAP':
+        #         best_epoch = epoch
 
         if acc > best_acc:
             best_acc = acc
@@ -183,17 +208,14 @@ def train(audio_model, train_loader, test_loader, args):
 
         if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
             if main_metrics == 'mAP':
-                scheduler.step(mAP)
+                #scheduler.step(mAP)
+                pass
             elif main_metrics == 'acc':
                 scheduler.step(acc)
         else:
             scheduler.step()
 
         print('Epoch-{0} lr: {1}'.format(epoch, optimizer.param_groups[0]['lr']))
-
-        with open(exp_dir + '/stats_' + str(epoch) +'.pickle', 'wb') as handle:
-            pickle.dump(stats, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        _save_progress()
 
         finish_time = time.time()
         print('epoch {:d} training time: {:.3f}'.format(epoch, finish_time-begin_time))
@@ -207,12 +229,13 @@ def train(audio_model, train_loader, test_loader, args):
         loss_meter.reset()
         per_sample_dnn_time.reset()
 
-def validate(audio_model, val_loader, args, output_pred=False):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def validate(audio_model, val_loader, args, local_rank, output_pred=False):
+    device = torch.device(f'cuda:{local_rank}')
     batch_time = AverageMeter()
-    if not isinstance(audio_model, nn.DataParallel):
-        audio_model = nn.DataParallel(audio_model)
-    audio_model = audio_model.to(device)
+    # if not isinstance(audio_model, nn.DataParallel):
+    #     audio_model = nn.DataParallel(audio_model)
+    # audio_model = audio_model.to(device)
     audio_model.eval()
 
     end = time.time()
@@ -240,11 +263,42 @@ def validate(audio_model, val_loader, args, output_pred=False):
         audio_output = torch.cat(A_predictions)
         target = torch.cat(A_targets)
         loss = np.mean(A_loss)
-
-        stats = calculate_stats(audio_output, target)
+        acc = calculate_acc(audio_output, target, k=1)
+        
+        #stats = calculate_stats(audio_output, target)
 
     if output_pred == False:
-        return stats, loss
+        return acc, loss
     else:
         # used for multi-frame evaluation (i.e., ensemble over frames), so return prediction and target
-        return stats, audio_output, target
+        return acc, audio_output, target
+    
+def calculate_acc(pred, target, k=1):
+    """
+    Calculate top-k accuracy.
+    
+    Args:
+        pred: Tensor of shape (N, C) - model logits or probabilities
+        target: Tensor of shape (N, C) - one-hot or multi-hot ground truth
+        k: int, top-k value
+        
+    Returns:
+        Top-k accuracy (float)
+    """
+    # Get top-k predicted class indices for each sample
+    topk_pred = pred.topk(k, dim=1).indices  # shape: (N, k)
+
+    # Expand target to indices (non-zero locations)
+    target_indices = target.nonzero(as_tuple=False)  # shape: (num_positives, 2)
+    target_dict = {i.item(): [] for i in target_indices[:, 0]}
+    for i, j in target_indices:
+        target_dict[i.item()].append(j.item())
+    
+    correct = 0
+    for i in range(pred.size(0)):
+        true_labels = target_dict.get(i, [])
+        pred_labels = topk_pred[i].tolist()
+        if any(label in pred_labels for label in true_labels):
+            correct += 1
+
+    return correct / pred.size(0)

@@ -18,10 +18,16 @@ from torch import nn
 import numpy as np
 import pickle
 from torch.cuda.amp import autocast,GradScaler
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
+import wandb
 
-
-def train(audio_model, train_loader, test_loader, args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def train(audio_model, train_loader, test_loader, args, local_rank):
+    
+    device = torch.device(f'cuda:{local_rank}')
+    audio_model.to(device)
+    audio_model = DDP(audio_model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
     print('running on ' + str(device))
     torch.set_grad_enabled(True)
 
@@ -40,13 +46,13 @@ def train(audio_model, train_loader, test_loader, args):
         with open("%s/progress.pkl" % exp_dir, "wb") as f:
             pickle.dump(progress, f)
 
-    if not isinstance(audio_model, nn.DataParallel):
-        audio_model = nn.DataParallel(audio_model)
+    # if not isinstance(audio_model, nn.DataParallel):
+    #     audio_model = nn.DataParallel(audio_model)
 
     audio_model = audio_model.to(device)
     trainables = [p for p in audio_model.parameters() if p.requires_grad]
-    print('Total parameter number is : {:.3f} million'.format(sum(p.numel() for p in audio_model.parameters()) / 1e6))
-    print('Total trainable parameter number is : {:.3f} million'.format(sum(p.numel() for p in trainables) / 1e6))
+    print('Total parameter number is : {:.3f} M'.format(sum(p.numel() for p in audio_model.parameters()) / 1e6))
+    print('Total trainable parameter number is : {:.3f} M'.format(sum(p.numel() for p in trainables) / 1e6))
     optimizer = torch.optim.Adam(trainables, args.lr, weight_decay=5e-7, betas=(0.95, 0.999))
 
     # use adapt learning rate scheduler, for preliminary experiments only, should not use for formal experiments
@@ -70,6 +76,8 @@ def train(audio_model, train_loader, test_loader, args):
     result = np.zeros([args.n_epochs, 10])  # for each epoch, 10 metrics to record
     audio_model.train()
     while epoch < args.n_epochs + 1:
+        train_loader.sampler.set_epoch(epoch)
+        test_loader.sampler.set_epoch(epoch)
         begin_time = time.time()
         end_time = time.time()
         audio_model.train()
@@ -77,9 +85,12 @@ def train(audio_model, train_loader, test_loader, args):
         print(datetime.datetime.now())
         print("current #epochs=%s, #steps=%s" % (epoch, global_step))
         print('current masking ratio is {:.3f} for both modalities; audio mask mode {:s}'.format(args.masking_ratio, args.mask_mode))
+       
+
+
 
         for i, (a_input, v_input, _) in enumerate(train_loader):
-
+            
             B = a_input.size(0)
             a_input = a_input.to(device, non_blocking=True)
             v_input = v_input.to(device, non_blocking=True)
@@ -107,6 +118,16 @@ def train(audio_model, train_loader, test_loader, args):
             per_sample_time.update((time.time() - end_time)/a_input.shape[0])
             per_sample_dnn_time.update((time.time() - dnn_start_time)/a_input.shape[0])
 
+            # log:
+            if args.use_wandb and local_rank == 0:
+                wandb.log({
+                    'train vision mae loss': loss_mae_v.item(),
+                    'train audio mae loss': loss_mae_a.item(),
+                    'train contra loss': loss_c.item(),
+                    'train loss_all': loss.item(),
+                    'iters': (epoch - 1) * len(train_loader) + i,
+                    'epoch': epoch
+                })
             print_step = global_step % args.n_print_steps == 0
             early_print_step = epoch == 0 and global_step % (args.n_print_steps/10) == 0
             print_step = print_step or early_print_step
@@ -131,7 +152,7 @@ def train(audio_model, train_loader, test_loader, args):
             global_step += 1
 
         print('start validation')
-        eval_loss_av, eval_loss_mae, eval_loss_mae_a, eval_loss_mae_v, eval_loss_c, eval_c_acc = validate(audio_model, test_loader, args)
+        eval_loss_av, eval_loss_mae, eval_loss_mae_a, eval_loss_mae_v, eval_loss_c, eval_c_acc = validate(audio_model, test_loader, args, local_rank=local_rank)
 
         print("Eval Audio MAE Loss: {:.6f}".format(eval_loss_mae_a))
         print("Eval Visual MAE Loss: {:.6f}".format(eval_loss_mae_v))
@@ -186,15 +207,15 @@ def train(audio_model, train_loader, test_loader, args):
         loss_v_meter.reset()
         loss_c_meter.reset()
 
-def validate(audio_model, val_loader, args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def validate(audio_model, val_loader, args, local_rank):
     batch_time = AverageMeter()
-    if not isinstance(audio_model, nn.DataParallel):
-        audio_model = nn.DataParallel(audio_model)
-    audio_model = audio_model.to(device)
+    # if not isinstance(audio_model, nn.DataParallel):
+    #     audio_model = nn.DataParallel(audio_model)
+    #audio_model = audio_model.to(device)
     audio_model.eval()
 
     end = time.time()
+    device = torch.device(f'cuda:{local_rank}')
     A_loss, A_loss_mae, A_loss_mae_a, A_loss_mae_v, A_loss_c, A_c_acc = [], [], [], [], [], []
     with torch.no_grad():
         for i, (a_input, v_input, _) in enumerate(val_loader):
@@ -203,6 +224,7 @@ def validate(audio_model, val_loader, args):
             with autocast():
                 loss, loss_mae, loss_mae_a, loss_mae_v, loss_c, mask_a, mask_v, c_acc = audio_model(a_input, v_input, args.masking_ratio, args.masking_ratio, mae_loss_weight=args.mae_loss_weight, contrast_loss_weight=args.contrast_loss_weight, mask_mode=args.mask_mode)
                 loss, loss_mae, loss_mae_a, loss_mae_v, loss_c, c_acc = loss.sum(), loss_mae.sum(), loss_mae_a.sum(), loss_mae_v.sum(), loss_c.sum(), c_acc.mean()
+            
             A_loss.append(loss.to('cpu').detach())
             A_loss_mae.append(loss_mae.to('cpu').detach())
             A_loss_mae_a.append(loss_mae_a.to('cpu').detach())

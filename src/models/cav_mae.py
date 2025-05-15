@@ -40,7 +40,7 @@ class Block(nn.Module):
         self.norm1_a = norm_layer(dim)
         self.norm1_v = norm_layer(dim)
         self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+            dim, num_heads=num_heads, qkv_bias=qkv_bias,  attn_drop=attn_drop, proj_drop=drop)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -377,8 +377,10 @@ class CAVMAE(nn.Module):
             # for audio, need to adjust the shape
             input = input.unsqueeze(1)
             input = input.transpose(2, 3)
+            # patch: 1, 8, 64, 16
             target = self.patchify(input, 1, int(input.shape[2]/self.patch_embed_a.patch_size[0]), int(input.shape[3]/self.patch_embed_a.patch_size[1]), 16)
         elif modality == 'v':
+            # 3, 14, 14, 16
             target = self.patchify(input, 3, int(input.shape[2]/self.patch_embed_v.patch_size[0]), int(input.shape[3]/self.patch_embed_v.patch_size[1]), 16)
 
         # patch-wise normalization might minorly improve the classification performance, but will make the model lose inpainting function
@@ -554,6 +556,8 @@ class CAVMAEFT(nn.Module):
 
             x = x.mean(dim=1)
             x = self.mlp_head(x)
+            x = torch.nn.functional.softmax(x, dim=-1)
+            
             return x
 
         # finetune with only audio (and inference with only audio when the model is finetuned with only audio)

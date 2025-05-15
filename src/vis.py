@@ -29,7 +29,9 @@ from torch.utils.data import DataLoader, DistributedSampler
 import wandb
 import socket
 
-# pretrain cav-mae model
+
+
+# finetune cav-mae model
 
 print("I am process %s, running on %s: starting (%s)" % (os.getpid(), os.uname()[1], time.asctime()))
 
@@ -49,8 +51,8 @@ parser.add_argument("--noise", help='if use balance sampling', type=ast.literal_
 parser.add_argument("--exp-dir", type=str, default="", help="directory to dump experiments")
 parser.add_argument('--lr', '--learning-rate', default=0.001, type=float, metavar='LR', help='initial learning rate')
 parser.add_argument("--optim", type=str, default="adam", help="training optimizer", choices=["sgd", "adam"])
-parser.add_argument('-b', '--batch-size', default=12, type=int, metavar='N', help='mini-batch size')
-parser.add_argument('-w', '--num-workers', default=8, type=int, metavar='NW', help='# of workers for dataloading (default: 32)')
+parser.add_argument('-b', '--batch-size', default=1, type=int, metavar='N', help='mini-batch size')
+parser.add_argument('-w', '--num-workers', default=32, type=int, metavar='NW', help='# of workers for dataloading (default: 32)')
 parser.add_argument("--n-epochs", type=int, default=1, help="number of maximum training epochs")
 # not used in the formal experiments, only for preliminary experiments
 parser.add_argument("--lr_patience", type=int, default=2, help="how many epoch to wait to reduce lr if mAP doesn't improve")
@@ -82,124 +84,87 @@ parser.add_argument("--use_wandb", action="store_true",
                         help="use wandb or not")
 args = parser.parse_args()
 
-
-
-
-
-im_res = 224
-audio_conf = {'num_mel_bins': 128, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': args.mixup, 'dataset': args.dataset, 'mode':'train', 'mean':args.dataset_mean, 'std':args.dataset_std,
-              'noise':args.noise, 'label_smooth': 0, 'im_res': im_res}
-val_audio_conf = {'num_mel_bins': 128, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': 0, 'dataset': args.dataset,
-                  'mode':'eval', 'mean': args.dataset_mean, 'std': args.dataset_std, 'noise': False, 'im_res': im_res}
-
-print('current mae loss {:.3f}, and contrastive loss {:.3f}'.format(args.mae_loss_weight, args.contrast_loss_weight))
-def setup_for_distributed(is_master):
-    """
-    This function disables printing when not in master process
-    """
-    import builtins as __builtin__
-    builtin_print = __builtin__.print
-
-    def print(*args, **kwargs):
-        force = kwargs.pop('force', False)
-        if is_master or force:
-            builtin_print(*args, **kwargs)
-
-    __builtin__.print = print
-
-def setup_distributed(visible_devices):
-    #os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
-    dist.init_process_group(backend="nccl")
-    local_rank = int(os.environ["RANK"])
-    torch.cuda.set_device(local_rank)
-    setup_for_distributed(local_rank == 0)
-    return local_rank
-
-
-local_rank = setup_distributed(args.visible_gpus)
-if args.use_wandb and local_rank == 0:
-        print("init wandb")
-        wandb.init( project=args.wandb_project_name,
-               entity='wanglg-institude-of-automation-cas',
-               notes=socket.gethostname(),
-               name='cav_1',
-               job_type="training",
-               reinit=True)
-        if args.wandb_run_name != None:
-            wandb.run.name = args.wandb_run_name
-        wandb.config.update(args)
-
-if args.bal == 'bal':
-    print('balanced sampler is being used')
-    if args.weight_file == None:
-        samples_weight = np.loadtxt(args.data_train[:-5]+'_weight.csv', delimiter=',')
-    else:
-        samples_weight = np.loadtxt(args.data_train[:-5] + '_' + args.weight_file + '.csv', delimiter=',')
-    #sampler = WeightedRandomSampler(samples_weight, len(samples_weight), replacement=True)
-    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf)
-    sampler = DistributedSampler(train_set)
+if __name__ == '__main__':
+    audio_conf = {'num_mel_bins': 128, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
+              'noise':True, 'label_smooth': 0, 'im_res': 224}
+    dataset = dataloader.AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700_val.json', audio_conf, label_csv='data/info/k700_class.csv')
+    print('dataset length is {:d}'.format(len(dataset)))
+    
     train_loader = torch.utils.data.DataLoader(
-        train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
-else:
-    print('balanced sampler is not used')
-    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf)
-    sampler = DistributedSampler(train_set)
-    train_loader = torch.utils.data.DataLoader(
-    train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+    dataset, batch_size=args.batch_size,shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
-val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf)
-val_sampler = DistributedSampler(val_set)
-val_loader = torch.utils.data.DataLoader(
-    val_set, batch_size=10, sampler = val_sampler, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
-
-if args.data_eval != None:
-    eval_loader = torch.utils.data.DataLoader(
-    val_set, batch_size=args.batch_size, sampler = val_sampler, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
-
-
-if args.model == 'cav-mae':
-    print('pretrain a cav-mae model with 11 modality-specific layers and 1 modality-sharing layers')
-    audio_model = models.CAVMAE(audio_length=args.target_length, norm_pix_loss=args.norm_pix_loss, modality_specific_depth=11, tr_pos=args.tr_pos)
-
-
-
-else:
-    raise ValueError('model not supported')
-
-# initialized with a pretrained checkpoint (e.g., original vision-MAE checkpoint)
-if args.pretrain_path != 'None':
-    mdl_weight = torch.load(args.pretrain_path, map_location=torch.device('cpu'))
-    # if not isinstance(audio_model, torch.nn.DataParallel):
-    #     audio_model = torch.nn.DataParallel(audio_model)
+    model = models.CAVMAE(audio_length=args.target_length, norm_pix_loss=args.norm_pix_loss, modality_specific_depth=11, tr_pos=args.tr_pos)
+    weight = '/data/wanglinge/project/cav-mae/src/exp/testmae-audioset-cav-mae-balNone-lr5e-5-epoch25-bs60-normTrue-c0.01-p1.0-tpFalse-mr-unstructured-0.75/models/audio_model.25.pth'
+    model_weight = torch.load(weight, map_location=torch.device('cpu'))
     new_state_dict = {}
-    for k, v in mdl_weight.items():
+    for k, v in model_weight.items():
         if k.startswith('module.'):
             new_state_dict[k[7:]] = v  # strip 'module.'
         else:
             new_state_dict[k] = v
-    miss, unexpected = audio_model.load_state_dict(new_state_dict, strict=False)
-    print('now load mae pretrained weights from ', args.pretrain_path)
-    print(miss, unexpected)
+    miss, unexpected = model.load_state_dict(new_state_dict, strict=False)
+    print("Miss:", miss)
+    print("unexpect:", unexpected)
 
-# if args.cont_model != None:
-#     print('now load pretrained weights from : ' + args.cont_model)
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     sdA = torch.load(args.cont_model, map_location=device)
-#     if isinstance(audio_model, torch.nn.DataParallel) == False:
-#         audio_model = torch.nn.DataParallel(audio_model)
-#     audio_model.load_state_dict(sdA, strict=True)
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from PIL import Image
+    def save_image_tensor(image_tensor, save_path):
+        image_np = image_tensor.squeeze(0).permute(1, 2, 0).cpu().detach().numpy()
+        image_np = (image_np - image_np.min()) / (image_np.max() - image_np.min())  # 归一化到[0,1]
+        image_uint8 = (image_np * 255).astype(np.uint8)
+        Image.fromarray(image_uint8).save(save_path)
+        print(f"Image saved to {save_path}")
+    def save_spectrogram_tensor(spec_tensor, save_path):
+        spec_np = spec_tensor.squeeze(0).cpu().detach().numpy()
+        spec_db = 10 * np.log10(np.maximum(spec_np, 1e-10))  # 转换为 dB 单位
 
-print("\nCreating experiment directory: %s" % args.exp_dir)
-try:
-    os.makedirs("%s/models" % args.exp_dir)
-except:
-    pass
-# with open("%s/args.pkl" % args.exp_dir, "wb") as f:
-#     pickle.dump(args, f)
-# with open(args.exp_dir + '/args.json', 'w') as f:
-#     json.dump(args.__dict__, f, indent=2)
+        plt.figure(figsize=(10, 4))
+        plt.imshow(spec_db, origin='lower', aspect='auto', cmap='magma')
+        plt.colorbar(format='%+2.0f dB')
+        plt.title('Spectrogram')
+        plt.xlabel('Time')
+        plt.ylabel('Frequency')
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300)
+        plt.close()
+        print(f"Spectrogram saved to {save_path}")
 
-print("val loader:", len(val_loader))
+    for i, (a_input, v_input, _) in enumerate(train_loader):
+        if i<3:
+            continue
+        save_image_tensor(v_input, "ori_v.png")
+        save_spectrogram_tensor(a_input[0], "ori_a.png")
+        pred_a, pred_v, mask_a, mask_v, loss_pixel_a, loss_pixel_v = model.forward_inpaint(audio=a_input, imgs=v_input)
+        print("audio:")
+        print(mask_a.shape)
+        print(pred_a.shape)
+        print("imgs:")
+        print(mask_v.shape)
+        print(pred_v.shape)
+        # patch: 1, 8, 64, 16
+        # 3, 14, 14, 16
+        img = model.patchify(v_input, 3, 14, 14, 16)
+        mean = img.mean(dim=-1, keepdim=True)
+        var = img.var(dim=-1, keepdim=True)
+        mask_v = mask_v.unsqueeze(-1)
+        pred_v = pred_v * var + mean
+        pred_v = img * (1 - mask_v) + pred_v * mask_v
+        pred_v = model.unpatchify(pred_v, c=3, h=14, w=14)
 
-print('Now starting training for {:d} epochs.'.format(args.n_epochs))
-train(audio_model, train_loader, val_loader, args, local_rank=local_rank)
+        audio = model.patchify(a_input, 1, 8, 64, 16)
+        mean = audio.mean(dim=-1, keepdim=True)
+        var = audio.var(dim=-1, keepdim=True)
+        mask_a = mask_a.unsqueeze(-1)
+        pred_a = pred_a * var + mean
+        pred_a = audio * (1 - mask_a) + pred_a * mask_a
+        pred_a = model.unpatchify(pred_a, 1, 8, 64, 16)
+        # print(pred_v.shape)
+        # print(pred_a.shape)
+
+        save_image_tensor(pred_v, "recons_v.png")
+        save_spectrogram_tensor(pred_a[0], "recos_a.png")
+        print(loss_pixel_a)
+        print(loss_pixel_v)
+        break
+
