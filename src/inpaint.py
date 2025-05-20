@@ -42,7 +42,8 @@ def run_one_image(audio, img, model, mask_ratio_a=0.75, mask_ratio_v=0.75, mask_
     y = model.module.unpatchify(y, 3, 14, 14, 16)
     y = torch.einsum('nchw->nhwc', y).detach().cpu()
 
-    y_a = model.module.unpatchify(y_a, 1, 8, 64, 16)
+    #y_a = model.module.unpatchify(y_a, 1, 8, 64, 16)
+    y_a = model.module.unpatchify(y_a, 1, 8, 25, 16)
     y_a = torch.einsum('nchw->nhwc', y_a).detach().cpu()
 
     # visualize the mask
@@ -53,7 +54,8 @@ def run_one_image(audio, img, model, mask_ratio_a=0.75, mask_ratio_v=0.75, mask_
 
     mask_a = mask_a.detach()
     mask_a = mask_a.unsqueeze(-1).repeat(1, 1, model.module.patch_embed_a.patch_size[0] ** 2 * 1)  # (N, H*W, p*p*3)
-    mask_a = model.module.unpatchify(mask_a, 1, 8, 64, 16)  # 1 is removing, 0 is keeping
+    # mask_a = model.module.unpatchify(mask_a, 1, 8, 64, 16)  # 1 is removing, 0 is keeping
+    mask_a = model.module.unpatchify(mask_a, 1, 8, 25, 16)  # 1 is removing, 0 is keeping
     mask_a = torch.einsum('nchw->nhwc', mask_a).detach().cpu()
 
     x = torch.einsum('nchw->nhwc', x)
@@ -94,14 +96,17 @@ mask_ratio_a, mask_ratio_v = 0.75, 0.75
 # or 'time' or 'freq' or 'tf'
 mask_mode = 'unstructured'
 # the model has to be trained without pixel normalization for inpaint purpose
-model_path = '/data/sls/scratch/yuangong/cav-mae/pretrained_model/cav_mae_models/audioset/main/cav-mae-base-nonorm.pth'
+model_path = '/data/wanglinge/project/cav-mae/src/exp/trainmae-k700-cav-mae-sync-lr5e-5-bs128-normFalse-c0.01-p1.0-tpFalse-mr-unstructured-0.75/models/audio_model.11.pth'
+save_dir = 'vis/sycn_recons'
+if not os.path.exists(save_dir):
+    os.mkdir(save_dir)
 
 A_loss_a, A_loss_v = [], []
 if os.path.exists('./sample_reconstruct') == False:
     os.makedirs('./sample_reconstruct')
 
-mae_mdl = models.CAVMAE(modality_specific_depth=11)
-
+# mae_mdl = models.CAVMAE(modality_specific_depth=11)
+mae_mdl = models.CAVMAE_Sync(audio_length=400)
 pretrained_weights = torch.load(model_path, map_location=device)
 mae_mdl = torch.nn.DataParallel(mae_mdl)
 msg = mae_mdl.load_state_dict(pretrained_weights, strict=False)
@@ -109,12 +114,12 @@ print('Model Loaded.', msg)
 mae_mdl = mae_mdl.to(device)
 mae_mdl.eval()
 
-val_audio_conf = {'num_mel_bins': 128, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0, 'dataset': 'vggsound',
+val_audio_conf = {'num_mel_bins': 128, 'target_length': 1000, 'freqm': 0, 'timem': 0, 'mixup': 0, 'dataset': 'vggsound',
                   'mode':'eval', 'mean': -5.081, 'std': 4.4849, 'noise': False, 'im_res': 224, 'frame_use': 5}
 
 # on vggsound, while the model is pretrained on AS-2M, so it is zero-shot.
 val_loader = torch.utils.data.DataLoader(
-    dataloader.AudiosetDataset('/data/sls/scratch/yuangong/cav-mae/pretrained_model/datafiles/vggsound/vgg_test_cleaned.json', label_csv='/data/sls/scratch/yuangong/cav-mae/pretrained_model/datafiles/vggsound/class_labels_indices_vgg.csv', audio_conf=val_audio_conf),
+    dataloader.AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700_test.json', label_csv='//data/wanglinge/project/cav-mae/src/data/info/k700_class.csv', audio_conf=val_audio_conf, align=True),
     batch_size=1, shuffle=False, num_workers=1, pin_memory=True)
 
 for i, (a_input, v_input, _) in enumerate(val_loader):
@@ -129,9 +134,10 @@ for i, (a_input, v_input, _) in enumerate(val_loader):
     A_loss_v.append(loss_v)
     fig = plt.gcf()
     fig.set_size_inches(10, 5)
-    plt.savefig('./sample_reconstruct/{:d}_{:.4f}_{:.4f}.png'.format(i, mask_ratio_a, mask_ratio_v), dpi=150)
+    save_path = os.path.join(save_dir, '{:d}_{:.4f}_{:.4f}.png'.format(i, mask_ratio_a, mask_ratio_v))
+    plt.savefig(save_path, dpi=150)
     plt.close()
-    # show 4 samples, change if you want to see more
+    #show 4 samples, change if you want to see more
     if i >= 3:
         break
 print('loss a is {:.4f}, loss v is {:.4f}'.format(np.mean(A_loss_a), np.mean(A_loss_v)))

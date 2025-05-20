@@ -82,7 +82,7 @@ class CAVMAE(nn.Module):
         self.patch_embed_a = PatchEmbed(img_size, patch_size, 1, embed_dim)
         self.patch_embed_v = PatchEmbed(img_size, patch_size, in_chans, embed_dim)
 
-        self.patch_embed_a.num_patches = int(audio_length * 128 / 256)
+        self.patch_embed_a.num_patches = int(audio_length * 128 / 256) #(audio_len / 16) * (audio_channels / 16)
         print('Number of Audio Patches: {:d}, Visual Patches: {:d}'.format(self.patch_embed_a.num_patches, self.patch_embed_v.num_patches))
 
         self.modality_a = nn.Parameter(torch.zeros(1, 1, embed_dim))
@@ -125,6 +125,7 @@ class CAVMAE(nn.Module):
         self.norm_pix_loss = norm_pix_loss
 
         self.initialize_weights()
+        
 
         print('Audio Positional Embedding Shape:', self.pos_embed_a.shape)
         print('Visual Positional Embedding Shape:', self.pos_embed_v.shape)
@@ -316,7 +317,6 @@ class CAVMAE(nn.Module):
     def forward_decoder(self, x, mask_a, ids_restore_a, mask_v, ids_restore_v):
 
         x = self.decoder_embed(x)
-
         # append mask tokens to sequence
         # mask_tokens_a in shape [B, #a_mask_token, mask_token_dim], get the number of masked samples from mask_a[0], which is the first example of the batch, all samples should have same number of masked tokens
         mask_tokens_a = self.mask_token.repeat(x.shape[0], int(mask_a[0].sum()), 1)
@@ -696,3 +696,320 @@ class CAVMAEFT(nn.Module):
 
             a = self.norm_a(a)
             return a
+
+# --------------------------------------------------------
+# CAVMAE finetune on action recognition task
+# vision modality input is video(10 frames) instead of image
+# we use glbal average pooling to get video feature
+# --------------------------------------------------------
+class CAVMAE_k700_FT(CAVMAEFT):
+    def __init__(self, label_dim, pooling=True,img_size=224, audio_length=1024, patch_size=16, in_chans=3,
+                 embed_dim=768, modality_specific_depth=11, num_heads=12, mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=True):
+        
+        self.pooling = pooling
+        super().__init__(label_dim, img_size, audio_length, patch_size, in_chans,
+                         embed_dim, modality_specific_depth, num_heads, mlp_ratio, norm_layer, norm_pix_loss, tr_pos)
+
+        
+    def forward(self, a, v, mode=None):
+        """
+        input:
+        a: audio input, shape [B, 1, 1024, 128]
+        v: video input, shape [B, 10, 3, 224, 224]
+        """
+        a = a.unsqueeze(1)
+        a = a.transpose(2, 3)
+        a = self.patch_embed_a(a)
+        a = a + self.pos_embed_a
+        a = a + self.modality_a
+        for blk in self.blocks_a:
+                a = blk(a)
+
+        # video input
+        B, T, C, H, W = v.shape
+        v = v.reshape(B * T, C, H, W)
+        v = self.patch_embed_v(v)
+        v = v + self.pos_embed_v
+        v = v + self.modality_v
+        for blk in self.blocks_v:
+                v = blk(v)
+        _, N, C = v.shape
+        if self.pooling:
+            v = v.reshape(B, T, N, C)
+            v = v.mean(dim=1) # global average pooling
+        else:
+            v = v.reshape(B, T*N, C) # use all vision tokens
+
+
+        x = torch.cat((a, v), dim=1)
+        for blk in self.blocks_u:
+            x = blk(x)
+        x = self.norm(x)
+
+        x = x.mean(dim=1)
+        x = self.mlp_head(x)
+        x = torch.nn.functional.softmax(x, dim=-1)
+        
+        return x
+
+
+
+# --------------------------------------------------------
+# my implementation of CAV-MAE-Sync, which is a modified version of CAV-MAE
+# CAV-MAE Sync: Improving Contrastive Audio-Visual Mask Autoencoders via Fine-Grained Alignment
+# Original paper: https://arxiv.org/abs/2505.01237
+# Implemented by: Linge Wang
+# Last Modified: 05/19/2025
+# --------------------------------------------------------
+class CAVMAE_Sync(CAVMAE):
+    def __init__(self, num_registers = 8,img_size=224, audio_length=400, patch_size=16, in_chans=3,
+                 embed_dim=768, modality_specific_depth=11, num_heads=12,
+                 decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
+                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=False):
+        super().__init__(img_size, audio_length, patch_size, in_chans,
+                         embed_dim, modality_specific_depth, num_heads, decoder_embed_dim, decoder_depth, decoder_num_heads,
+                         mlp_ratio, norm_layer, norm_pix_loss, tr_pos)           
+        self.num_register_token = num_registers    
+        self.global_token_v = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.global_token_a = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.register_token_a = nn.Parameter(torch.zeros(1, self.num_register_token, embed_dim))
+        self.register_token_v = nn.Parameter(torch.zeros(1, self.num_register_token, embed_dim))
+
+        # pos embedding:
+        self.register_pos_embed_a = nn.Parameter(torch.randn(1, self.num_register_token, embed_dim))
+        self.register_pos_embed_v = nn.Parameter(torch.randn(1, self.num_register_token, embed_dim))
+        self.decoder_register_pos_embed_a = nn.Parameter(torch.randn(1, self.num_register_token, decoder_embed_dim))
+        self.decoder_register_pos_embed_v = nn.Parameter(torch.randn(1, self.num_register_token, decoder_embed_dim))
+
+        self.init_add_weight()
+        print('register token shape:', self.register_token_a.shape)
+
+    def init_add_weight(self):
+        # init weight for additional paramerter added to CAVMAE_Sync
+        pos_embed_a = get_2d_sincos_pos_embed(self.register_pos_embed_a.shape[-1], 8, int(self.num_register_token/8), cls_token=False)
+        self.register_pos_embed_a.data.copy_(torch.from_numpy(pos_embed_a).float().unsqueeze(0))
+        pos_embed_v = get_2d_sincos_pos_embed(self.register_pos_embed_v.shape[-1], 8, int(self.num_register_token/8), cls_token=False)
+        self.register_pos_embed_v.data.copy_(torch.from_numpy(pos_embed_v).float().unsqueeze(0))
+        decoder_pos_embed_a = get_2d_sincos_pos_embed(self.decoder_register_pos_embed_a.shape[-1], 8, int(self.num_register_token/8), cls_token=False)
+        self.decoder_register_pos_embed_a.data.copy_(torch.from_numpy(decoder_pos_embed_a).float().unsqueeze(0))
+        decoder_pos_embed_v = get_2d_sincos_pos_embed(self.decoder_register_pos_embed_v.shape[-1], 8, int(self.num_register_token/8), cls_token=False)
+        self.decoder_register_pos_embed_v.data.copy_(torch.from_numpy(decoder_pos_embed_v).float().unsqueeze(0))
+
+        torch.nn.init.normal_(self.global_token_a, std=.02)
+        torch.nn.init.normal_(self.global_token_v, std=.02)
+        torch.nn.init.normal_(self.register_token_a, std=.02)
+        torch.nn.init.normal_(self.register_token_v, std=.02)
+        
+
+    def forward_encoder(self, a, v, mask_ratio_a, mask_ratio_v, mask_mode='unstructured'):
+        
+
+        # embed patches
+        a = a.unsqueeze(1)
+        a = a.transpose(2, 3)
+        a = self.patch_embed_a(a)
+        a = a + self.pos_embed_a
+        v = self.patch_embed_v(v)
+        v = v + self.pos_embed_v
+        
+
+        register_token_v = self.register_token_v + self.register_pos_embed_v
+        register_token_a = self.register_token_a + self.register_pos_embed_a
+        
+        # by default, we always use unstructured masking
+        if mask_mode == 'unstructured':
+            a, mask_a, ids_restore_a = self.random_masking_unstructured(a, mask_ratio_a)
+        # in ablation study, we tried time/freq/tf masking. mode in ['freq', 'time', 'tf']
+        else:
+            a, mask_a, ids_restore_a = self.random_masking_structured(a, mask_ratio_a, t=64, f=8, mode=mask_mode)
+
+        # visual branch always use unstructured masking
+        v, mask_v, ids_restore_v = self.random_masking_unstructured(v, mask_ratio_v)
+
+        # modality-specific encoder:
+        B = v.shape[0]
+
+        global_token_v = self.global_token_v.repeat(B, 1, 1)
+        register_token_v = register_token_v.repeat(B, 1, 1)
+        global_token_a = self.global_token_a.repeat(B, 1, 1)
+        register_token_a = register_token_a.repeat(B, 1, 1)
+        v = torch.cat([global_token_v, register_token_v, v], dim=1)
+        a = torch.cat([global_token_a, register_token_a, a], dim=1)
+        v = v + self.modality_v
+        a = a + self.modality_a
+
+        for blk in self.blocks_a:
+            a = blk(a)
+
+        for blk in self.blocks_v:
+            v = blk(v)
+
+        # unified stream, shared blocks_u, but independent normalization layers
+        x = torch.cat((a, v), dim=1)
+
+        # unified stream, shared blocks_u, but independent normalization layers
+        for blk in self.blocks_u:
+            x = blk(x)
+        x = self.norm(x) # (ga, ra, pa, gv, rv, pv)
+
+        for blk in self.blocks_u:
+            ca = blk(a, 'a')
+        ca = self.norm_a(ca)
+
+        for blk in self.blocks_u:
+            cv = blk(v, 'v')
+        cv = self.norm_v(cv)
+
+        return x, mask_a, ids_restore_a, mask_v, ids_restore_v, ca, cv
+    
+    def forward_decoder(self, x, mask_a, ids_restore_a, mask_v, ids_restore_v):
+        x = self.decoder_embed(x)
+        # append mask tokens to sequence
+        # mask_tokens_a in shape [B, #a_mask_token, mask_token_dim], get the number of masked samples from mask_a[0], which is the first example of the batch, all samples should have same number of masked tokens
+        mask_tokens_a = self.mask_token.repeat(x.shape[0], int(mask_a[0].sum()), 1)
+        offset = self.num_register_token + 1
+        a_ = torch.cat([x[:, :offset+self.patch_embed_a.num_patches-int(mask_a[0].sum()), :], mask_tokens_a], dim=1)  # no cls token
+        ids_restore_a = ids_restore_a + offset
+        offset_ids = torch.arange(offset, device=x.device).unsqueeze(0).repeat(x.shape[0], 1)
+        ids_restore_a = torch.cat([offset_ids, ids_restore_a], dim=1)
+        a_ = torch.gather(a_, dim=1, index=ids_restore_a.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
+
+        # similar for the visual modality
+        mask_tokens_v = self.mask_token.repeat(x.shape[0], int(mask_v[0].sum()), 1)
+        v_ = torch.cat([x[:, offset+self.patch_embed_a.num_patches-int(mask_a[0].sum()):, :], mask_tokens_v], dim=1)  # no cls token
+        ids_restore_v = ids_restore_v + offset
+        ids_restore_v = torch.cat([offset_ids, ids_restore_v], dim=1)
+        v_ = torch.gather(v_, dim=1, index=ids_restore_v.unsqueeze(-1).repeat(1, 1, x.shape[2]))  # unshuffle
+
+        x = torch.cat([a_, v_], dim=1) #(ga, ra, pa, gv, rv, pv) 1+8+na+1+8+nv
+        global_pos_embed = torch.zeros_like(x[:1, :1, :], device=x.device)
+        
+        decoder_pos_embed = torch.cat([global_pos_embed, self.decoder_register_pos_embed_a, self.decoder_pos_embed_a, 
+                                       global_pos_embed, self.decoder_register_pos_embed_v, self.decoder_pos_embed_v], dim=1)
+        assert decoder_pos_embed.shape[1] == x.shape[1], "Decoder pos embed length mismatch"
+        
+        x = x + decoder_pos_embed
+
+        # add modality indication tokens
+        x[:, :offset + self.patch_embed_a.num_patches, :] += self.decoder_modality_a
+        x[:, offset + self.patch_embed_a.num_patches:, :] += self.decoder_modality_v
+
+        
+        # apply Transformer blocks
+        for blk in self.decoder_blocks:
+            x = blk(x)
+        x = self.decoder_norm(x)
+
+        # predictor projection
+        x_a = self.decoder_pred_a(x[:, offset:self.patch_embed_a.num_patches + offset, :])
+        x_v = self.decoder_pred_v(x[:, self.patch_embed_a.num_patches + offset*2:, :])
+
+        # return audio and video tokens
+        return x_a, x_v
+
+    def forward(self, audio, imgs, mask_ratio_a=0.75, mask_ratio_v=0.75, mae_loss_weight=1., contrast_loss_weight=0.01, mask_mode='unstructured'):
+        latent, mask_a, ids_restore_a, mask_v, ids_restore_v, latent_c_a, latent_c_v = self.forward_encoder(audio, imgs, mask_ratio_a, mask_ratio_v, mask_mode=mask_mode)
+        if mae_loss_weight != 0:
+            pred_a, pred_v = self.forward_decoder(latent, mask_a, ids_restore_a, mask_v, ids_restore_v)
+            loss_mae_a = self.forward_mae_loss(audio, pred_a, mask_a, 'a')
+            loss_mae_v = self.forward_mae_loss(imgs, pred_v, mask_v, 'v')
+            loss_mae = mae_loss_weight * (loss_mae_a + loss_mae_v)
+        else:
+            loss_mae_a, loss_mae_v, loss_mae = torch.tensor(0.0, device=audio.device), torch.tensor(0.0, device=audio.device), torch.tensor(0.0, device=audio.device)
+
+
+        # if contrastive loss is used
+        if contrast_loss_weight != 0:
+            # note this is single directional
+            loss_c, c_acc = self.forward_contrastive(latent_c_a[:, 0, ...], latent_c_v[:, 0, ...])
+            loss_c = contrast_loss_weight * loss_c
+        else:
+            loss_c, c_acc = torch.tensor(0.0, device=audio.device), torch.tensor(0.0, device=audio.device)
+
+        loss = loss_mae + loss_c
+
+        return loss, loss_mae, loss_mae_a, loss_mae_v, loss_c, mask_a, mask_v, c_acc
+
+
+
+# --------------------------------------------------------
+# Finetune model for CAVMAE_Sync
+# --------------------------------------------------------
+class CAVMAE_Sync_k700_FT(CAVMAEFT):
+    def __init__(self, label_dim, num_registers = 8, pooling=True, img_size=224, audio_length=1024, patch_size=16, in_chans=3,
+                 embed_dim=768, modality_specific_depth=11, num_heads=12, mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=True):
+        super().__init__(label_dim, img_size, audio_length, patch_size, in_chans,
+                         embed_dim, modality_specific_depth, num_heads, mlp_ratio, norm_layer, norm_pix_loss, tr_pos)
+        self.num_register_token = num_registers    
+        self.pooling = pooling
+        self.global_token_v = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.global_token_a = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.register_token_a = nn.Parameter(torch.zeros(1, self.num_register_token, embed_dim))
+        self.register_token_v = nn.Parameter(torch.zeros(1, self.num_register_token, embed_dim))
+
+        # pos embedding:
+        self.register_pos_embed_a = nn.Parameter(torch.randn(1, self.num_register_token, embed_dim))
+        self.register_pos_embed_v = nn.Parameter(torch.randn(1, self.num_register_token, embed_dim))
+        self.init_add_weight()
+        # print('register token shape:', self.register_token_a.shape)
+
+
+    def init_add_weight(self):
+        # init weight for additional paramerter added to CAVMAE_Sync
+        pos_embed_a = get_2d_sincos_pos_embed(self.register_pos_embed_a.shape[-1], 8, int(self.num_register_token/8), cls_token=False)
+        self.register_pos_embed_a.data.copy_(torch.from_numpy(pos_embed_a).float().unsqueeze(0))
+        pos_embed_v = get_2d_sincos_pos_embed(self.register_pos_embed_v.shape[-1], 8, int(self.num_register_token/8), cls_token=False)
+        self.register_pos_embed_v.data.copy_(torch.from_numpy(pos_embed_v).float().unsqueeze(0))
+
+        torch.nn.init.normal_(self.global_token_a, std=.02)
+        torch.nn.init.normal_(self.global_token_v, std=.02)
+        torch.nn.init.normal_(self.register_token_a, std=.02)
+        torch.nn.init.normal_(self.register_token_v, std=.02)
+
+    def forward(self, a, v, mode=None):
+        a = a.unsqueeze(1)
+        a = a.transpose(2, 3)
+        a = self.patch_embed_a(a)
+        a = a + self.pos_embed_a
+
+        
+
+        register_token_v = self.register_token_v + self.register_pos_embed_v
+        register_token_a = self.register_token_a + self.register_pos_embed_a
+
+        # video input
+        B, T, C, H, W = v.shape
+        v = v.reshape(B * T, C, H, W)
+        v = self.patch_embed_v(v)
+        v = v + self.pos_embed_v
+        global_token_v = self.global_token_v.repeat(B*T, 1, 1)
+        register_token_v = register_token_v.repeat(B*T, 1, 1)
+        global_token_a = self.global_token_a.repeat(B, 1, 1)
+        register_token_a = register_token_a.repeat(B, 1, 1)
+        v = torch.cat([global_token_v, register_token_v, v], dim=1)
+        a = torch.cat([global_token_a, register_token_a, a], dim=1)
+        v = v + self.modality_v
+        a = a + self.modality_a
+        for blk in self.blocks_a:
+            a = blk(a)
+
+        for blk in self.blocks_v:
+            v = blk(v)
+        _, N, C = v.shape
+        if self.pooling:
+            v = v.reshape(B, T, N, C)
+            v = v.mean(dim=1) # global average pooling
+        else:
+            v = v.reshape(B, T*N, C)
+
+        x = torch.cat((a, v), dim=1)
+        for blk in self.blocks_u:
+                x = blk(x)
+        x = self.norm(x)
+
+        x = x.mean(dim=1)
+        x = self.mlp_head(x)
+        x = torch.nn.functional.softmax(x, dim=-1)
+        return x
+# if __name__ =='__main__':
+#     model = CAVMAE_Sync(img_size=224, audio_length=400, patch_size=16, in_chans=3,)

@@ -61,12 +61,13 @@ def preemphasis(signal,coeff=0.97):
     return np.append(signal[0],signal[1:]-coeff*signal[:-1])
 
 class AudiosetDataset(Dataset):
-    def __init__(self, dataset_json_file, audio_conf, label_csv=None):
+    def __init__(self, dataset_json_file, audio_conf, label_csv=None, vision='image', align = False, num_frames=10, audio_seg_len = 4):
         """
         Dataset that manages audio recordings
         :param audio_conf: Dictionary containing the audio loading and preprocessing settings
         :param dataset_json_file
         """
+
         self.datapath = dataset_json_file
         with open(dataset_json_file, 'r') as fp:
             data_json = json.load(fp)
@@ -131,6 +132,18 @@ class AudiosetDataset(Dataset):
                 mean=[0.4850, 0.4560, 0.4060],
                 std=[0.2290, 0.2240, 0.2250]
             )])
+        
+        # -------------------------
+        # modified properties
+        self.vision = vision        # if use all frames
+        self.align = align          # if align audio and frame, refer to https://arxiv.org/abs/2505.01237 for details
+        self.num_frames = num_frames
+        self.audio_seg_len = audio_seg_len
+        self.spec_seg_len = int(self.target_length / num_frames)
+        self.spec_window_size_half = int(0.5*self.spec_seg_len * audio_seg_len)
+        if self.vision != 'image':
+            self.mixup = 0      # if not image, set mixup to 0
+        # -------------------------
 
     # change python list to numpy array to avoid memory leak.
     def pro_data(self, data_json):
@@ -166,7 +179,7 @@ class AudiosetDataset(Dataset):
     def _wav2fbank(self, filename, filename2=None, mix_lambda=-1):
         # no mixup
         if filename2 == None:
-            waveform, sr = torchaudio.load(filename)
+            waveform, sr = torchaudio.load(filename)    #([1, 160269])
             waveform = waveform - waveform.mean()
         # mixup
         else:
@@ -191,10 +204,11 @@ class AudiosetDataset(Dataset):
 
         try:
             fbank = torchaudio.compliance.kaldi.fbank(waveform, htk_compat=True, sample_frequency=sr, use_energy=False, window_type='hanning', num_mel_bins=self.melbins, dither=0.0, frame_shift=10)
+            
         except:
             fbank = torch.zeros([512, 128]) + 0.01
             print('there is a loading error')
-
+        #print("fbank shape is ", fbank.shape)   #(1000, 128)
         target_length = self.target_length
         n_frames = fbank.shape[0]
 
@@ -217,7 +231,7 @@ class AudiosetDataset(Dataset):
             else:
                 frame_idx = self.frame_use
         else:
-            frame_idx = random.randint(0, 9)
+            frame_idx = random.randint(0, self.num_frames-1)
 
         while os.path.exists(video_path + '/frame_' + str(frame_idx) + '/' + video_id + '.jpg') == False and frame_idx >= 1:
             print('frame {:s} {:d} does not exist'.format(video_id, frame_idx))
@@ -225,8 +239,27 @@ class AudiosetDataset(Dataset):
         out_path = video_path + '/frame_' + str(frame_idx) + '/' + video_id + '.jpg'
         #print(out_path)
         return out_path
+    
+
+
+    def align_img_spec(self, fbank, frame_idx):
+        # align the audio and video
+        # fbank shape is [time_frame_num, frequency_bins], e.g., [1024, 128]
+        # frame_idx is the index of the image
+        S_center = int(self.spec_seg_len * (0.5 + frame_idx))
+        S_start = S_center - self.spec_window_size_half
+        S_end = S_center + self.spec_window_size_half
+        fbank_len = fbank.shape[0]
+        if S_start < 0:
+            fbank = fbank[0:self.spec_window_size_half * 2]
+        elif S_end > fbank_len:
+            fbank = fbank[fbank_len-self.spec_window_size_half * 2:fbank_len]
+        else:
+            fbank = fbank[S_start:S_end]
+        return fbank
 
     def __getitem__(self, index):
+
         if random.random() < self.mixup:
             datum = self.data[index]
             datum = self.decode_data(datum)
@@ -241,10 +274,14 @@ class AudiosetDataset(Dataset):
                 fbank = torch.zeros([self.target_length, 128]) + 0.01
                 print('there is an error in loading audio')
             try:
-                image = self.get_image(self.randselect_img(datum['video_id'], datum['video_path']), self.randselect_img(mix_datum['video_id'], datum['video_path']), mix_lambda)
+                path1 = self.randselect_img(datum['video_id'], datum['video_path'])
+                path2 = self.randselect_img(mix_datum['video_id'], datum['video_path'])
+                image = self.get_image(path1, path2, mix_lambda)
             except:
                 image = torch.zeros([3, self.im_res, self.im_res]) + 0.01
                 print('there is an error in loading image')
+
+
             label_indices = np.zeros(self.label_num) + (self.label_smooth / self.label_num)
             for label_str in datum['labels'].split(','):
                 label_indices[int(self.index_dict[label_str])] += mix_lambda * (1.0 - self.label_smooth)
@@ -262,11 +299,21 @@ class AudiosetDataset(Dataset):
             except:
                 fbank = torch.zeros([self.target_length, 128]) + 0.01
                 print('there is an error in loading audio')
-            try:
-                image = self.get_image(self.randselect_img(datum['video_id'], datum['video_path']), None, 0)
-            except:
-                image = torch.zeros([3, self.im_res, self.im_res]) + 0.01
-                print('there is an error in loading image')
+            if self.vision == 'image':
+                try:
+                    path1 = self.randselect_img(datum['video_id'], datum['video_path'])
+                    image = self.get_image(path1, None, 0)
+                except:
+                    image = torch.zeros([3, self.im_res, self.im_res]) + 0.01
+                    print('there is an error in loading image')
+            elif self.vision == 'video':
+                frame_id = range(10)
+                path1 = self.randselect_img(datum['video_id'], datum['video_path'])
+                image_paths = [datum['video_path'] + '/frame_' + str(frame_id[i]) + '/' + datum['video_id'] + '.jpg' for i in range(10)]
+                images = [self.get_image(image_paths[i], None, 0) for i in range(10)]
+                image = torch.stack(images, dim=0)
+            else:
+                raise ValueError('vision should be image or video')
             for label_str in datum['labels'].split(','):
                 label_indices[int(self.index_dict[label_str])] = 1.0 - self.label_smooth
             label_indices = torch.FloatTensor(label_indices)
@@ -294,6 +341,12 @@ class AudiosetDataset(Dataset):
             fbank = fbank + torch.rand(fbank.shape[0], fbank.shape[1]) * np.random.rand() / 10
             fbank = torch.roll(fbank, np.random.randint(-self.target_length, self.target_length), 0)
 
+        # align audio spec and frame idx
+        if self.align:
+            image_path = path1
+            frame_dir = image_path.strip(os.sep).split(os.sep)[-2]
+            frame_idx = int(frame_dir[-1])
+            fbank = self.align_img_spec(fbank, frame_idx)
         # fbank shape is [time_frame_num, frequency_bins], e.g., [1024, 128]
         return fbank, image, label_indices
 
@@ -302,12 +355,19 @@ class AudiosetDataset(Dataset):
     
 if __name__ == '__main__':
     # test the dataloader
-    audio_conf = {'num_mel_bins': 128, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
+    audio_conf = {'num_mel_bins': 128, 'target_length': 1000, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
               'noise':True, 'label_smooth': 0, 'im_res': 224}
-    dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700_val.json', audio_conf, label_csv='data/info/k700_class.csv')
+    dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700_val.json', audio_conf, label_csv='data/info/k700_class.csv', vision='video', align=True)
     print('dataset length is {:d}'.format(len(dataset)))
-    for i in range(10):
-        fbank, image, label_indices = dataset[i]
+    loader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=False, num_workers=0)
+    from models.cav_mae import CAVMAE_k700_FT, CAVMAE_Sync_k700_FT
+    model = CAVMAE_Sync_k700_FT(label_dim = 700, pooling=True, audio_length=400)
+    for i, (fbank, image, label_indices) in enumerate(loader):
         print(fbank.shape)
         print(image.shape)
-        print(label_indices.shape)
+        pred = model(fbank, image)
+        print(pred.shape)
+        # print(image.shape)
+        # print(label_indices.shape)
+        # pred = model(fbank, image)
+        break

@@ -28,7 +28,27 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 import wandb
 import socket
+def setup_for_distributed(is_master):
+    """
+    This function disables printing when not in master process
+    """
+    import builtins as __builtin__
+    builtin_print = __builtin__.print
 
+    def print(*args, **kwargs):
+        force = kwargs.pop('force', False)
+        if is_master or force:
+            builtin_print(*args, **kwargs)
+
+    __builtin__.print = print
+
+def setup_distributed(visible_devices):
+    #os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
+    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ["RANK"])
+    torch.cuda.set_device(local_rank)
+    setup_for_distributed(local_rank == 0)
+    return local_rank
 # pretrain cav-mae model
 
 print("I am process %s, running on %s: starting (%s)" % (os.getpid(), os.uname()[1], time.asctime()))
@@ -50,7 +70,7 @@ parser.add_argument("--exp-dir", type=str, default="", help="directory to dump e
 parser.add_argument('--lr', '--learning-rate', default=0.001, type=float, metavar='LR', help='initial learning rate')
 parser.add_argument("--optim", type=str, default="adam", help="training optimizer", choices=["sgd", "adam"])
 parser.add_argument('-b', '--batch-size', default=12, type=int, metavar='N', help='mini-batch size')
-parser.add_argument('-w', '--num-workers', default=8, type=int, metavar='NW', help='# of workers for dataloading (default: 32)')
+parser.add_argument('-w', '--num-workers', default=4, type=int, metavar='NW', help='# of workers for dataloading (default: 32)')
 parser.add_argument("--n-epochs", type=int, default=1, help="number of maximum training epochs")
 # not used in the formal experiments, only for preliminary experiments
 parser.add_argument("--lr_patience", type=int, default=2, help="how many epoch to wait to reduce lr if mAP doesn't improve")
@@ -77,49 +97,41 @@ parser.add_argument("--masking_ratio", type=float, default=0.75, help="masking r
 parser.add_argument("--mask_mode", type=str, default='unstructured', help="masking ratio", choices=['unstructured', 'time', 'freq', 'tf'])
 parser.add_argument("--visible_gpus", type=str, default='0,1,2,3,4,5')
 parser.add_argument("--wandb_project_name", type=str, default='cav')
-parser.add_argument("--wandb_run_name", type=str, default='cav_baseline')
+parser.add_argument("--wandb_run_name", type=str, default='cav_sync')
 parser.add_argument("--use_wandb", action="store_true",
                         help="use wandb or not")
+parser.add_argument("--wandb_id", type=str, default=None,
+                        help="wandb id if resuming from a previous run")                        
+parser.add_argument("--resume", action="store_true",
+                        help="resume from a previous run")
 args = parser.parse_args()
-
-
-
-
-
 im_res = 224
+
+local_rank = setup_distributed(args.visible_gpus)
 audio_conf = {'num_mel_bins': 128, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': args.mixup, 'dataset': args.dataset, 'mode':'train', 'mean':args.dataset_mean, 'std':args.dataset_std,
               'noise':args.noise, 'label_smooth': 0, 'im_res': im_res}
 val_audio_conf = {'num_mel_bins': 128, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': 0, 'dataset': args.dataset,
                   'mode':'eval', 'mean': args.dataset_mean, 'std': args.dataset_std, 'noise': False, 'im_res': im_res}
 
 print('current mae loss {:.3f}, and contrastive loss {:.3f}'.format(args.mae_loss_weight, args.contrast_loss_weight))
-def setup_for_distributed(is_master):
-    """
-    This function disables printing when not in master process
-    """
-    import builtins as __builtin__
-    builtin_print = __builtin__.print
-
-    def print(*args, **kwargs):
-        force = kwargs.pop('force', False)
-        if is_master or force:
-            builtin_print(*args, **kwargs)
-
-    __builtin__.print = print
-
-def setup_distributed(visible_devices):
-    #os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
-    dist.init_process_group(backend="nccl")
-    local_rank = int(os.environ["RANK"])
-    torch.cuda.set_device(local_rank)
-    setup_for_distributed(local_rank == 0)
-    return local_rank
 
 
-local_rank = setup_distributed(args.visible_gpus)
+
 if args.use_wandb and local_rank == 0:
         print("init wandb")
-        wandb.init( project=args.wandb_project_name,
+        if args.wandb_id != None:
+            args.resume = True
+            print("resuming wandb run with id: ", args.wandb_id)
+            wandb.init( project=args.wandb_project_name,
+                entity='wanglg-institude-of-automation-cas',
+                notes=socket.gethostname(),
+                id=args.wandb_id,
+                name=args.wandb_run_name,
+                resume="must",
+                job_type="training",
+                reinit=True)
+        else:
+            wandb.init( project=args.wandb_project_name,
                entity='wanglg-institude-of-automation-cas',
                notes=socket.gethostname(),
                name='cav_1',
@@ -129,6 +141,18 @@ if args.use_wandb and local_rank == 0:
             wandb.run.name = args.wandb_run_name
         wandb.config.update(args)
 
+
+if args.model == 'cav-mae':
+    print('pretrain a cav-mae model with 11 modality-specific layers and 1 modality-sharing layers')
+    audio_model = models.CAVMAE(audio_length=args.target_length, norm_pix_loss=args.norm_pix_loss, modality_specific_depth=11, tr_pos=args.tr_pos)
+    args.align = False
+elif args.model == 'cav-mae-sync':
+    audio_model = models.CAVMAE_Sync(audio_length=int(args.target_length * 0.4), norm_pix_loss=args.norm_pix_loss, modality_specific_depth=11, tr_pos=args.tr_pos)
+    args.align = True
+else:
+    raise ValueError('model not supported')
+
+
 if args.bal == 'bal':
     print('balanced sampler is being used')
     if args.weight_file == None:
@@ -136,18 +160,19 @@ if args.bal == 'bal':
     else:
         samples_weight = np.loadtxt(args.data_train[:-5] + '_' + args.weight_file + '.csv', delimiter=',')
     #sampler = WeightedRandomSampler(samples_weight, len(samples_weight), replacement=True)
-    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf)
+    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, align=args.align)
     sampler = DistributedSampler(train_set)
     train_loader = torch.utils.data.DataLoader(
         train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 else:
     print('balanced sampler is not used')
-    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf)
+    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, align=args.align)
     sampler = DistributedSampler(train_set)
     train_loader = torch.utils.data.DataLoader(
     train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
-val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf)
+
+val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf, align=args.align)
 val_sampler = DistributedSampler(val_set)
 val_loader = torch.utils.data.DataLoader(
     val_set, batch_size=10, sampler = val_sampler, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
@@ -157,47 +182,37 @@ if args.data_eval != None:
     val_set, batch_size=args.batch_size, sampler = val_sampler, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
 
-if args.model == 'cav-mae':
-    print('pretrain a cav-mae model with 11 modality-specific layers and 1 modality-sharing layers')
-    audio_model = models.CAVMAE(audio_length=args.target_length, norm_pix_loss=args.norm_pix_loss, modality_specific_depth=11, tr_pos=args.tr_pos)
-
-
-
-else:
-    raise ValueError('model not supported')
-
 # initialized with a pretrained checkpoint (e.g., original vision-MAE checkpoint)
 if args.pretrain_path != 'None':
     mdl_weight = torch.load(args.pretrain_path, map_location=torch.device('cpu'))
-    # if not isinstance(audio_model, torch.nn.DataParallel):
-    #     audio_model = torch.nn.DataParallel(audio_model)
     new_state_dict = {}
     for k, v in mdl_weight.items():
         if k.startswith('module.'):
             new_state_dict[k[7:]] = v  # strip 'module.'
         else:
             new_state_dict[k] = v
-    miss, unexpected = audio_model.load_state_dict(new_state_dict, strict=False)
-    print('now load mae pretrained weights from ', args.pretrain_path)
-    print(miss, unexpected)
+    model_state = audio_model.state_dict()
+    filtered_dict = {k: v for k, v in new_state_dict.items() if k in model_state and v.shape == model_state[k].shape}
 
-# if args.cont_model != None:
-#     print('now load pretrained weights from : ' + args.cont_model)
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     sdA = torch.load(args.cont_model, map_location=device)
-#     if isinstance(audio_model, torch.nn.DataParallel) == False:
-#         audio_model = torch.nn.DataParallel(audio_model)
-#     audio_model.load_state_dict(sdA, strict=True)
+    # report mismatches
+    ignored_keys = [k for k in new_state_dict if k not in filtered_dict]
+    if ignored_keys:
+        print(f"⚠️ Skipped loading {len(ignored_keys)} parameters due to shape mismatch or absence in model:")
+        for k in ignored_keys:
+            print(f"  - {k}")
 
-print("\nCreating experiment directory: %s" % args.exp_dir)
+    # load compatible params only
+    audio_model.load_state_dict(filtered_dict, strict=False)
+    print(f'✅ Successfully loaded {len(filtered_dict)} matching parameters.')
+
+
+
+
 try:
     os.makedirs("%s/models" % args.exp_dir)
 except:
     pass
-# with open("%s/args.pkl" % args.exp_dir, "wb") as f:
-#     pickle.dump(args, f)
-# with open(args.exp_dir + '/args.json', 'w') as f:
-#     json.dump(args.__dict__, f, indent=2)
+
 
 print("val loader:", len(val_loader))
 

@@ -23,6 +23,45 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 import wandb
 
+def resume_training(audio_model, optimizer, exp_dir, device):
+    """
+    Resume training from the latest checkpoint if available.
+
+    Args:
+        audio_model (torch.nn.Module): The model to be trained.
+        optimizer (torch.optim.Optimizer): The optimizer used for training.
+        exp_dir (str): The directory where model checkpoints are saved.
+        device (torch.device): The device to load the model and optimizer onto.
+
+    Returns:
+        int: The starting epoch for training.
+    """
+    checkpoint_path = os.path.join(exp_dir, "models", "best_audio_model.pth")
+    optimizer_path = os.path.join(exp_dir, "models", "best_optim_state.pth")
+
+    if os.path.exists(checkpoint_path) and os.path.exists(optimizer_path):
+        
+        
+        # Load optimizer state
+        optimizer_state = torch.load(optimizer_path, map_location=device)
+        optimizer.load_state_dict(optimizer_state)
+        # Extract the last saved epoch
+        ckpt_list = os.listdir(os.path.join(exp_dir, "models"))
+        epochs = [int(f.split('.')[-2]) for f in ckpt_list if f.endswith('.pth') and f.startswith('audio_model')]
+        start_epoch = max(epochs) if epochs else 0
+        # # Load model weights
+        checkpoint_path = os.path.join(exp_dir, "models", f"audio_model.{start_epoch}.pth")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        audio_model.load_state_dict(checkpoint)
+        print(f"Resuming training from checkpoint: {checkpoint_path}")
+        print(f"Resumed training from epoch {start_epoch}")
+    else:
+        print("No checkpoint found. Starting training from scratch.")
+        start_epoch = 1
+
+    return start_epoch
+
+
 def train(audio_model, train_loader, test_loader, args, local_rank):
     
     device = torch.device(f'cuda:{local_rank}')
@@ -39,16 +78,6 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
     global_step, epoch = 0, 0
     start_time = time.time()
     exp_dir = args.exp_dir
-
-    def _save_progress():
-        progress.append([epoch, global_step, best_epoch, best_loss,
-                time.time() - start_time])
-        with open("%s/progress.pkl" % exp_dir, "wb") as f:
-            pickle.dump(progress, f)
-
-    # if not isinstance(audio_model, nn.DataParallel):
-    #     audio_model = nn.DataParallel(audio_model)
-
     audio_model = audio_model.to(device)
     trainables = [p for p in audio_model.parameters() if p.requires_grad]
     print('Total parameter number is : {:.3f} M'.format(sum(p.numel() for p in audio_model.parameters()) / 1e6))
@@ -67,10 +96,26 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
 
     # #optional, save epoch 0 untrained model, for ablation study on model initialization purpose
     # torch.save(audio_model.state_dict(), "%s/models/audio_model.%d.pth" % (exp_dir, epoch))
+    if args.resume:
+        epoch = resume_training(audio_model, optimizer=optimizer, exp_dir=args.exp_dir, device=device)
+        global_step = (epoch - 1) * len(train_loader) 
+
+        # run = wandb.run
+        # api = wandb.Api()
+    
+        # run_path = os.path.join("wanglg-institude-of-automation-cas/cav", args.wandb_id)
+        # run = api.run(run_path)
+        # history = run.history()
+        # last_iter = history["iters"].dropna().iloc[-1]
+        # if last_iter is not None:
+        #     global_step = int(last_iter)
+        #     print(f"Resuming from global step {global_step}")
+        # else:
+        #     global_step = 0
 
     epoch += 1
     scaler = GradScaler()
-
+    
     print("current #steps=%s, #epochs=%s" % (global_step, epoch))
     print("start training...")
     result = np.zeros([args.n_epochs, 10])  # for each epoch, 10 metrics to record
@@ -85,7 +130,6 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
         print(datetime.datetime.now())
         print("current #epochs=%s, #steps=%s" % (epoch, global_step))
         print('current masking ratio is {:.3f} for both modalities; audio mask mode {:s}'.format(args.masking_ratio, args.mask_mode))
-       
 
 
 
@@ -189,8 +233,6 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
             scheduler.step()
 
         print('Epoch-{0} lr: {1}'.format(epoch, optimizer.param_groups[0]['lr']))
-
-        _save_progress()
 
         finish_time = time.time()
         print('epoch {:d} training time: {:.3f}'.format(epoch, finish_time-begin_time))

@@ -1,11 +1,9 @@
 import json
 
-# 原始 json 路径
+
 input_path = '/data/wanglinge/project/cav-mae/src/data/info/k700_val.json'
-# 修改后的保存路径
 output_path1 = '/data/wanglinge/project/cav-mae/src/data/info/k700_val_1.json'
 output_path2 = '/data/wanglinge/project/cav-mae/src/data/info/k700_val_2.json'
-# 新路径前缀
 new_base_path = '/data/wanglinge/dataset/data/k700/test'
 new_audio_path = f'{new_base_path}/audio'
 
@@ -16,10 +14,9 @@ nums = len(data_json['data'])
 print(f'原始数据集长度: {nums}')
 data_1 = data_json['data'][:nums//4]
 data_2 = data_json['data'][nums//4:]
-# 写入第一个 json
+
 with open(output_path1, 'w') as f:
     json.dump({'data': data_1}, f, indent=2)
-# 写入第二个 json
 with open(output_path2, 'w') as f:
     json.dump({'data': data_2}, f, indent=2)
 

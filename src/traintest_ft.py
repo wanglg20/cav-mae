@@ -21,6 +21,45 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 import wandb
 
+def resume_training_ft(audio_model, optimizer, exp_dir, device):
+    """
+    Resume training from the latest checkpoint if available.
+
+    Args:
+        audio_model (torch.nn.Module): The model to be trained.
+        optimizer (torch.optim.Optimizer): The optimizer used for training.
+        exp_dir (str): The directory where model checkpoints are saved.
+        device (torch.device): The device to load the model and optimizer onto.
+
+    Returns:
+        int: The starting epoch for training.
+    """
+    checkpoint_path = os.path.join(exp_dir, "models", "best_audio_model.pth")
+    optimizer_path = os.path.join(exp_dir, "models", "best_optim_state.pth")
+
+    if os.path.exists(checkpoint_path) and os.path.exists(optimizer_path):
+        
+        
+        # Load optimizer state
+        optimizer_state = torch.load(optimizer_path, map_location=device)
+        optimizer.load_state_dict(optimizer_state)
+        # Extract the last saved epoch
+        ckpt_list = os.listdir(os.path.join(exp_dir, "models"))
+        epochs = [int(f.split('.')[-2]) for f in ckpt_list if f.endswith('.pth') and f.startswith('audio_model')]
+        start_epoch = max(epochs) if epochs else 0
+        # # Load model weights
+        checkpoint_path = os.path.join(exp_dir, "models", f"audio_model.{start_epoch}.pth")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        audio_model.load_state_dict(checkpoint)
+        print(f"Resuming training from checkpoint: {checkpoint_path}")
+        print(f"Resumed training from epoch {start_epoch}")
+    else:
+        print("No checkpoint found. Starting training from scratch.")
+        start_epoch = 1
+
+    return start_epoch
+
+
 def calculate_grad_norm(model):
     total_norm = 0
     parameters = [p for p in model.parameters() if p.grad is not None and p.requires_grad]
@@ -46,11 +85,6 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
     global_step, epoch = 0, 0
     start_time = time.time()
     exp_dir = args.exp_dir
-
-    def _save_progress():
-        progress.append([epoch, global_step, best_epoch, best_mAP, time.time() - start_time])
-        with open("%s/progress.pkl" % exp_dir, "wb") as f:
-            pickle.dump(progress, f)
 
 
     # possible mlp layer name list, mlp layers are newly initialized layers in the finetuning stage (i.e., not pretrained) and should use a larger lr during finetuning
@@ -99,13 +133,14 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
     args.loss_fn = loss_fn
 
     print('now training with {:s}, main metrics: {:s}, loss function: {:s}, learning rate scheduler: {:s}'.format(str(args.dataset), str(main_metrics), str(loss_fn), str(scheduler)))
-
+    if args.resume:
+        epoch = resume_training_ft(audio_model, optimizer=optimizer, exp_dir=args.exp_dir, device=device)
+        global_step = (epoch - 1) * len(train_loader)
     epoch += 1
     scaler = GradScaler()
 
     print("current #steps=%s, #epochs=%s" % (global_step, epoch))
     print("start training...")
-
     audio_model.train()
     while epoch < args.n_epochs + 1:
         train_loader.sampler.set_epoch(epoch)
@@ -117,9 +152,7 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
         print('---------------')
         print(datetime.datetime.now())
         print("current #epochs=%s, #steps=%s" % (epoch, global_step))
-
         for i, (a_input, v_input, labels) in enumerate(train_loader):
-
             B = a_input.size(0)
             a_input, v_input = a_input.to(device, non_blocking=True), v_input.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)

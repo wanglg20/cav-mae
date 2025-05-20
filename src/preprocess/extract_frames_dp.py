@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 
 cv2.setNumThreads(0) 
-# 预处理管道
+# preprocess pipeline
 preprocess = T.Compose([
     T.Resize(224),
     T.CenterCrop(224),
@@ -22,7 +22,7 @@ preprocess = T.Compose([
 
 def extract_frame(input_video_path: str, target_fold: str, extract_frame_num: int = 10):
     """
-    从视频中抽取若干帧并保存为 JPEG。
+    extract frames from video
     """
     # 根据文件名生成 video_id
     ext = os.path.splitext(input_video_path)[1]
@@ -46,14 +46,13 @@ def extract_frame(input_video_path: str, target_fold: str, extract_frame_num: in
         pil_im = Image.fromarray(cv2_im)
         image_tensor = preprocess(pil_im)
 
-        # 保存路径
         frame_dir = os.path.join(target_fold, f'frame_{i}')
         os.makedirs(frame_dir, exist_ok=True)
         out_path = os.path.join(frame_dir, f'{video_id}.jpg')
         save_image(image_tensor, out_path)
 
 def _worker(args):
-    """Pool 的包装函数，捕获异常并打印日志"""
+    """the worker function for multiprocessing"""
     input_path, target_fold = args
     try:
         extract_frame(input_path, target_fold)
@@ -61,20 +60,20 @@ def _worker(args):
         print(f'[ERROR] {input_path}: {e}')
 
 if __name__ == "__main__":
-    parser = ArgumentParser(description="并行抽取视频帧")
+    parser = ArgumentParser(description="Extract frames from videos")
     parser.add_argument(
         "-input_file_list", type=str,
         default='/data/wanglinge/project/cav-mae/src/data/info/k700_train.csv',
-        help="包含视频路径的 CSV 文件（单列，无表头或已跳过表头）"
+        help="input file list"
     )
     parser.add_argument(
         "-target_fold", type=str,
         default='/data/wanglinge/project/cav-mae/src/data/k700/train',
-        help="保存帧的目标文件夹"
+        help="folder to save extracted frames"
     )
     parser.add_argument(
         "-num_workers", type=int, default=64,
-        help="并行进程数，默认为 CPU 核心数"
+        help="num of threads to use for parallel processing"
     )
     args = parser.parse_args()
 

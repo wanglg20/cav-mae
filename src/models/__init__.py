@@ -5,5 +5,5 @@
 # @Email   : yuangong@mit.edu
 # @File    : __init__.py
 
-from .cav_mae import CAVMAE, CAVMAEFT
+from .cav_mae import CAVMAE, CAVMAEFT, CAVMAE_k700_FT, CAVMAE_Sync, CAVMAE_Sync_k700_FT
 from .audio_mdl import CAVMAEFTAudio

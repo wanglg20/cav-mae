@@ -1,18 +1,18 @@
 export CUDA_VISIBLE_DEVICES=4,5,6,7
 
-model=cav-mae-ft
+model=cav-mae-sync-ft
 ftmode=multimodal
 
 # you can replace with any checkpoint you want, but by default, we use cav-mae-scale++
 cur_dir=$(pwd)
-pretrain_path=/data/wanglinge/project/cav-mae/src/exp/trainmae-audioset-cav-mae-lr5e-5-bs60-normTrue-c0.01-p1.0-tpFalse-mr-unstructured-0.75/models/audio_model.9.pth
+pretrain_path=/data/wanglinge/project/cav-mae/src/exp/trainmae-k700-cav-mae-sync-lr5e-5-bs128-normFalse-c0.01-p1.0-tpFalse-mr-unstructured-0.75/models/audio_model.10.pth
 
 freeze_base=False
 head_lr=100 # newly initialized ft layers uses 100 times larger than the base lr
 
 bal=None
 lr=5e-5
-epoch=25
+epoch=5
 lrscheduler_start=5
 lrscheduler_decay=0.5
 lrscheduler_step=1
@@ -22,7 +22,7 @@ wa_end=15
 lr_adapt=False
 dataset_mean=-5.081
 dataset_std=4.4849
-target_length=1024
+target_length=1000
 noise=True
 freqm=48
 timem=192
@@ -32,9 +32,9 @@ label_smooth=0.1
 
 dataset=audioset
 tr_data=/data/wanglinge/project/cav-mae/src/data/info/k700_val.json
-te_data=/data/wanglinge/project/cav-mae/src/data/info/k700_val.json
+te_data=/data/wanglinge/project/cav-mae/src/data/info/k700_test.json
 label_csv=/data/wanglinge/project/cav-mae/src/data/info/k700_class.csv
-exp_dir=./exp/mae_ft-all_frames-norm_${lr}-bs${batch_size}-lda${lr_adapt}-${ftmode}-fz${freeze_base}-h${head_lr}-a5
+exp_dir=./exp/mae_ft_sync-all_frames-norm_${lr}-bs${batch_size}-lda${lr_adapt}-${ftmode}-fz${freeze_base}-h${head_lr}-a5
 cd /data/wanglinge/project/cav-mae/src
 mkdir -p $exp_dir
 
@@ -52,4 +52,4 @@ PYTHONWARNINGS=ignore torchrun --nproc_per_node=4 run_cavmae_ft.py --model ${mod
 --pretrain_path ${pretrain_path} --ftmode ${ftmode} \
 --freeze_base ${freeze_base} --head_lr ${head_lr} \
 --num-workers 3 --pooling \
---use_wandb
+--use_wandb --wandb_run_name sync_ft
