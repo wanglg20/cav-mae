@@ -5,8 +5,7 @@ ftmode=audioonly
 
 # you can replace with any checkpoint you want, but by default, we use cav-mae-scale++
 cur_dir=$(pwd)
-pretrain_path=/data/wanglinge/project/cav-mae/src/exp/trainmae-audioset-cav-mae-lr5e-5-bs60-normFalse-c0.01-p1.0-tpFalse-mr-unstructured-0.75/models/audio_model.25.pth
-pretrain_path=/data/wanglinge/project/cav-mae/src/weight/official_release/audio_model.21.pth
+pretrain_path=/data/wanglinge/project/cav-mae/src/exp/trainmae-k700-cav-mae-sync-lr5e-5-bs128-normFalse-c0.01-p1.0-tpFalse-mr-unstructured-0.75/models/best_audio_model.pth
 freeze_base=False
 head_lr=100 # newly initialized ft layers uses 100 times larger than the base lr
 
@@ -53,4 +52,4 @@ PYTHONWARNINGS=ignore torchrun --master_port=29505 --nproc_per_node=4 run_cavmae
 --freeze_base ${freeze_base} --head_lr ${head_lr} \
 --num-workers 4 --pooling --use_dist True \
 --raw_data as \
---use_wandb --wandb_run_name cav_official_weight_ft_as
+--use_wandb --wandb_run_name cav_sync_ft_as

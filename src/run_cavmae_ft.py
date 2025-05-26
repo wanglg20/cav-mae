@@ -175,8 +175,12 @@ if args.model == 'cav-mae-ft':
     
     args.align = False
 elif args.model == 'cav-mae-sync-ft':
-    audio_model = models.CAVMAE_Sync_k700_FT(label_dim=args.n_class,pooling=args.pooling, audio_length=int(args.target_length * 0.4),  modality_specific_depth=11)
-    args.align = True
+    audio_model = models.CAVMAE_Sync_k700_FT(label_dim=args.n_class,pooling=args.pooling, audio_length=400,  modality_specific_depth=11)
+    if args.raw_data != 'as':
+        args.align = True
+    else:
+        args.align = False
+
 else:
     raise ValueError('model not supported')
 

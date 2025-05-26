@@ -298,7 +298,7 @@ def validate(audio_model, val_loader, args, local_rank, output_pred=False, retur
             with autocast():
                 audio_output = audio_model(a_input, v_input, args.ftmode)
             predictions = audio_output.to('cpu').detach()
-            predictions = torch.sigmoid(audio_output.float())
+            # predictions = torch.sigmoid(audio_output.float())
             A_predictions.append(predictions)
             A_targets.append(labels)
 

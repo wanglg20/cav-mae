@@ -6,6 +6,8 @@
 # @File    : cav_mae.py
 
 import os
+
+from models import pos_embed
 os.environ['TORCH_HOME'] = './pretrained_models'
 import random
 import torch
@@ -971,50 +973,79 @@ class CAVMAE_Sync_k700_FT(CAVMAEFT):
         torch.nn.init.normal_(self.register_token_v, std=.02)
 
     def forward(self, a, v, mode=None):
-        a = a.unsqueeze(1)
-        a = a.transpose(2, 3)
-        a = self.patch_embed_a(a)
-        a = a + self.pos_embed_a
+        if mode == 'audioonly':
+            a = a.unsqueeze(1)
+            a = a.transpose(2, 3)
+            a = self.patch_embed_a(a)
+            if self.pos_embed_a.shape[1] != a.shape[1]:
+                ori_pos_embed_a = self.pos_embed_a
+                pos_embed_a = torch.nn.functional.interpolate(ori_pos_embed_a.permute(0, 2, 1), size=a.shape[1], mode='linear', align_corners=True).permute(0, 2, 1)
+            else:
+                pos_embed_a = self.pos_embed_a
+            a = a + pos_embed_a
+            register_token_a = self.register_token_a + self.register_pos_embed_a
+            a = a + self.modality_a
+            B = a.shape[0]
+            global_token_a = self.global_token_a.repeat(B, 1, 1)
+            register_token_a = register_token_a.repeat(B, 1, 1)
+            a = torch.cat([global_token_a, register_token_a, a], dim=1)
+            register_token_a = register_token_a.repeat(B, 1, 1)
+            for blk in self.blocks_a:
+                a = blk(a)
+            a = self.norm(a)
+            x = a.mean(dim=1)
+            x = self.mlp_head(x)
+            return x
 
-        
-
-        register_token_v = self.register_token_v + self.register_pos_embed_v
-        register_token_a = self.register_token_a + self.register_pos_embed_a
-
-        # video input
-        B, T, C, H, W = v.shape
-        v = v.reshape(B * T, C, H, W)
-        v = self.patch_embed_v(v)
-        v = v + self.pos_embed_v
-        global_token_v = self.global_token_v.repeat(B*T, 1, 1)
-        register_token_v = register_token_v.repeat(B*T, 1, 1)
-        global_token_a = self.global_token_a.repeat(B, 1, 1)
-        register_token_a = register_token_a.repeat(B, 1, 1)
-        v = torch.cat([global_token_v, register_token_v, v], dim=1)
-        a = torch.cat([global_token_a, register_token_a, a], dim=1)
-        v = v + self.modality_v
-        a = a + self.modality_a
-        for blk in self.blocks_a:
-            a = blk(a)
-
-        for blk in self.blocks_v:
-            v = blk(v)
-        _, N, C = v.shape
-        if self.pooling:
-            v = v.reshape(B, T, N, C)
-            v = v.mean(dim=1) # global average pooling
         else:
-            v = v.reshape(B, T*N, C)
+            a = a.unsqueeze(1)
+            a = a.transpose(2, 3)
+            a = self.patch_embed_a(a)
+            # interplation if pos_embed_a is not the same size as a
+            if self.pos_embed_a.shape[1] != a.shape[1]:
+                ori_pos_embed_a = self.pos_embed_a
+                pos_embed_a = torch.nn.functional.interpolate(ori_pos_embed_a.permute(0, 2, 1).unsqueeze(0), size=(1, a.shape[1]), mode='linear', align_corners=False).squeeze(0).permute(0, 2, 1)
+            else:
+                pos_embed_a = self.pos_embed_a
+            a = a + pos_embed_a
 
-        x = torch.cat((a, v), dim=1)
-        for blk in self.blocks_u:
-                x = blk(x)
-        x = self.norm(x)
+            register_token_v = self.register_token_v + self.register_pos_embed_v
+            register_token_a = self.register_token_a + self.register_pos_embed_a
 
-        x = x.mean(dim=1)
-        x = self.mlp_head(x)
-        if self.softmax:
-            x = torch.nn.functional.softmax(x, dim=-1)
-        return x
+            # video input
+            B, T, C, H, W = v.shape
+            v = v.reshape(B * T, C, H, W)
+            v = self.patch_embed_v(v)
+            v = v + self.pos_embed_v
+            global_token_v = self.global_token_v.repeat(B*T, 1, 1)
+            register_token_v = register_token_v.repeat(B*T, 1, 1)
+            global_token_a = self.global_token_a.repeat(B, 1, 1)
+            register_token_a = register_token_a.repeat(B, 1, 1)
+            v = torch.cat([global_token_v, register_token_v, v], dim=1)
+            a = torch.cat([global_token_a, register_token_a, a], dim=1)
+            v = v + self.modality_v
+            a = a + self.modality_a
+            for blk in self.blocks_a:
+                a = blk(a)
+
+            for blk in self.blocks_v:
+                v = blk(v)
+            _, N, C = v.shape
+            if self.pooling:
+                v = v.reshape(B, T, N, C)
+                v = v.mean(dim=1) # global average pooling
+            else:
+                v = v.reshape(B, T*N, C)
+
+            x = torch.cat((a, v), dim=1)
+            for blk in self.blocks_u:
+                    x = blk(x)
+            x = self.norm(x)
+
+            x = x.mean(dim=1)
+            x = self.mlp_head(x)
+            if self.softmax:
+                x = torch.nn.functional.softmax(x, dim=-1)
+            return x
 # if __name__ =='__main__':
 #     model = CAVMAE_Sync(img_size=224, audio_length=400, patch_size=16, in_chans=3,)
