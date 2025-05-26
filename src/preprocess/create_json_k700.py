@@ -4,7 +4,6 @@ import csv
 from collections import defaultdict
 
 
-
 def generate_json_manifest(csv_path, output_json, audio_base_dir, video_frame_base_dir):
     """
     参数：

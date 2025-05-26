@@ -33,7 +33,8 @@ def clean_json(dataset_json_file):
             new_entry = {}
             new_entry['video_id'] = video_id
             new_entry['wav'] = wav
-            new_entry['video_path'] = video_path
+            #new_entry['video_path'] = video_path
+            new_entry['video_path'] = None
             new_entry['labels'] = labels
             new_data.append(new_entry)
 

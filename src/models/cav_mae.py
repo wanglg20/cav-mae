@@ -503,7 +503,7 @@ class CAVMAEFT(nn.Module):
         return test_output.shape[2], test_output[3], test_output[2] * test_output[2]
 
     def initialize_weights(self):
-        pos_embed_a = get_2d_sincos_pos_embed(self.pos_embed_a.shape[-1], 8, int(self.patch_embed_a.num_patches/8), cls_token=False)
+        pos_embed_a = get_2d_sincos_pos_embed(self.pos_embed_a.shape[-1], 4, int(self.patch_embed_a.num_patches/4), cls_token=False)
         self.pos_embed_a.data.copy_(torch.from_numpy(pos_embed_a).float().unsqueeze(0))
 
         pos_embed_v = get_2d_sincos_pos_embed(self.pos_embed_v.shape[-1], int(self.patch_embed_v.num_patches ** .5), int(self.patch_embed_v.num_patches ** .5), cls_token=False)
@@ -703,10 +703,11 @@ class CAVMAEFT(nn.Module):
 # we use glbal average pooling to get video feature
 # --------------------------------------------------------
 class CAVMAE_k700_FT(CAVMAEFT):
-    def __init__(self, label_dim, pooling=True,img_size=224, audio_length=1024, patch_size=16, in_chans=3,
+    def __init__(self, label_dim, softmax= False, pooling=True,img_size=224, audio_length=1024, patch_size=16, in_chans=3,
                  embed_dim=768, modality_specific_depth=11, num_heads=12, mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=True):
         
         self.pooling = pooling
+        self.softmax = softmax
         super().__init__(label_dim, img_size, audio_length, patch_size, in_chans,
                          embed_dim, modality_specific_depth, num_heads, mlp_ratio, norm_layer, norm_pix_loss, tr_pos)
 
@@ -748,7 +749,8 @@ class CAVMAE_k700_FT(CAVMAEFT):
 
         x = x.mean(dim=1)
         x = self.mlp_head(x)
-        x = torch.nn.functional.softmax(x, dim=-1)
+        if self.softmax:
+            x = torch.nn.functional.softmax(x, dim=-1)
         
         return x
 
@@ -762,7 +764,7 @@ class CAVMAE_k700_FT(CAVMAEFT):
 # Last Modified: 05/19/2025
 # --------------------------------------------------------
 class CAVMAE_Sync(CAVMAE):
-    def __init__(self, num_registers = 8,img_size=224, audio_length=400, patch_size=16, in_chans=3,
+    def __init__(self, softmax=True, num_registers = 8,img_size=224, audio_length=400, patch_size=16, in_chans=3,
                  embed_dim=768, modality_specific_depth=11, num_heads=12,
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
                  mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=False):
@@ -770,6 +772,7 @@ class CAVMAE_Sync(CAVMAE):
                          embed_dim, modality_specific_depth, num_heads, decoder_embed_dim, decoder_depth, decoder_num_heads,
                          mlp_ratio, norm_layer, norm_pix_loss, tr_pos)           
         self.num_register_token = num_registers    
+        self.softmax = softmax
         self.global_token_v = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.global_token_a = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.register_token_a = nn.Parameter(torch.zeros(1, self.num_register_token, embed_dim))
@@ -936,7 +939,7 @@ class CAVMAE_Sync(CAVMAE):
 # Finetune model for CAVMAE_Sync
 # --------------------------------------------------------
 class CAVMAE_Sync_k700_FT(CAVMAEFT):
-    def __init__(self, label_dim, num_registers = 8, pooling=True, img_size=224, audio_length=1024, patch_size=16, in_chans=3,
+    def __init__(self, label_dim, softmax= True, num_registers = 8, pooling=True, img_size=224, audio_length=1024, patch_size=16, in_chans=3,
                  embed_dim=768, modality_specific_depth=11, num_heads=12, mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=True):
         super().__init__(label_dim, img_size, audio_length, patch_size, in_chans,
                          embed_dim, modality_specific_depth, num_heads, mlp_ratio, norm_layer, norm_pix_loss, tr_pos)
@@ -951,6 +954,7 @@ class CAVMAE_Sync_k700_FT(CAVMAEFT):
         self.register_pos_embed_a = nn.Parameter(torch.randn(1, self.num_register_token, embed_dim))
         self.register_pos_embed_v = nn.Parameter(torch.randn(1, self.num_register_token, embed_dim))
         self.init_add_weight()
+        self.softmax = softmax
         # print('register token shape:', self.register_token_a.shape)
 
 
@@ -1009,7 +1013,8 @@ class CAVMAE_Sync_k700_FT(CAVMAEFT):
 
         x = x.mean(dim=1)
         x = self.mlp_head(x)
-        x = torch.nn.functional.softmax(x, dim=-1)
+        if self.softmax:
+            x = torch.nn.functional.softmax(x, dim=-1)
         return x
 # if __name__ =='__main__':
 #     model = CAVMAE_Sync(img_size=224, audio_length=400, patch_size=16, in_chans=3,)

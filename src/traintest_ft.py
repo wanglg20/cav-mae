@@ -20,6 +20,7 @@ from torch.cuda.amp import autocast,GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 import wandb
+from sklearn.metrics import average_precision_score
 
 def resume_training_ft(audio_model, optimizer, exp_dir, device):
     """
@@ -74,7 +75,8 @@ def calculate_grad_norm(model):
 def train(audio_model, train_loader, test_loader, args, local_rank):
     device = torch.device(f'cuda:{local_rank}')
     audio_model.to(device)
-    audio_model = DDP(audio_model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    if args.use_dist:
+        audio_model = DDP(audio_model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
     print('running on ' + str(device))
     torch.set_grad_enabled(True)
 
@@ -141,13 +143,13 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
 
     print("current #steps=%s, #epochs=%s" % (global_step, epoch))
     print("start training...")
+    args.n_print_steps = 10
     audio_model.train()
     while epoch < args.n_epochs + 1:
         train_loader.sampler.set_epoch(epoch)
         test_loader.sampler.set_epoch(epoch)
         begin_time = time.time()
         end_time = time.time()
-        print(train_loader.sampler)
         audio_model.train()
         print('---------------')
         print(datetime.datetime.now())
@@ -173,7 +175,7 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
             grad_norm = calculate_grad_norm(audio_model)
             if args.use_wandb and local_rank == 0:
                 wandb.log({
-                    'train CE_loss': loss.item(),
+                    'training loss': loss.item(),
                     'grad_norm':grad_norm,
                     'iters': (epoch - 1) * len(train_loader) + i,
                     'epoch': epoch,
@@ -189,6 +191,7 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
             early_print_step = epoch == 0 and global_step % (args.n_print_steps/10) == 0
             print_step = print_step or early_print_step
 
+            
             if print_step and global_step != 0:
                 print('Epoch: [{0}][{1}/{2}]\t'
                   'Per Sample Total Time {per_sample_time.avg:.5f}\t'
@@ -204,8 +207,23 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
             end_time = time.time()
             global_step += 1
 
+
         print('start validation')
-        acc, valid_loss =  validate(audio_model, test_loader, args, local_rank=local_rank)
+
+        if args.raw_data == 'k700':
+            acc, valid_loss =  validate(audio_model, test_loader, args, local_rank=local_rank)
+            print("acc: {:.6f}".format(acc))
+            if acc > best_acc:
+                best_acc = acc
+                if main_metrics == 'acc':
+                    best_epoch = epoch
+        else:
+            mAP, valid_loss = validate(audio_model, test_loader, args, local_rank=local_rank, return_ap=True)
+            print("mAP:{:.6f}".format(mAP))
+            if mAP > best_mAP:
+                best_mAP = mAP
+                if main_metrics == 'mAP':
+                    best_epoch = epoch
         # stats, valid_loss = validate(audio_model, test_loader, args, local_rank)
 
         # mAP = np.mean([stat['AP'] for stat in stats])
@@ -216,33 +234,32 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
         #     print("mAP: {:.6f}".format(mAP))
         # else:
         #     print("acc: {:.6f}".format(acc))
-        print("acc: {:.6f}".format(acc))
         # print("AUC: {:.6f}".format(mAUC))
         # print("d_prime: {:.6f}".format(d_prime(mAUC)))
         print("train_loss: {:.6f}".format(loss_meter.avg))
         print("valid_loss: {:.6f}".format(valid_loss))
         print('validation finished')
+        if args.use_wandb and local_rank == 0:
+                wandb.log({
+                    'valid_loss': valid_loss,
+                    'epoch': epoch,
+                    'mAP': mAP if main_metrics == 'mAP' else None,
+                    'acc': acc if main_metrics == 'acc' else None,
+                })
 
-        # if mAP > best_mAP:
-        #     best_mAP = mAP
-        #     if main_metrics == 'mAP':
-        #         best_epoch = epoch
 
-        if acc > best_acc:
-            best_acc = acc
-            if main_metrics == 'acc':
-                best_epoch = epoch
 
         if best_epoch == epoch:
             torch.save(audio_model.state_dict(), "%s/models/best_audio_model.pth" % (exp_dir))
             torch.save(optimizer.state_dict(), "%s/models/best_optim_state.pth" % (exp_dir))
-        if args.save_model == True:
+        save_interval = 5
+        if args.save_model == True and (epoch % save_interval == 0 or epoch == args.n_epochs):
             torch.save(audio_model.state_dict(), "%s/models/audio_model.%d.pth" % (exp_dir, epoch))
 
         if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
             if main_metrics == 'mAP':
-                #scheduler.step(mAP)
-                pass
+                scheduler.step(mAP)
+                
             elif main_metrics == 'acc':
                 scheduler.step(acc)
         else:
@@ -263,7 +280,7 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
         per_sample_dnn_time.reset()
 
 
-def validate(audio_model, val_loader, args, local_rank, output_pred=False):
+def validate(audio_model, val_loader, args, local_rank, output_pred=False, return_ap = False):
     device = torch.device(f'cuda:{local_rank}')
     batch_time = AverageMeter()
     # if not isinstance(audio_model, nn.DataParallel):
@@ -280,14 +297,14 @@ def validate(audio_model, val_loader, args, local_rank, output_pred=False):
 
             with autocast():
                 audio_output = audio_model(a_input, v_input, args.ftmode)
-
             predictions = audio_output.to('cpu').detach()
-
+            predictions = torch.sigmoid(audio_output.float())
             A_predictions.append(predictions)
             A_targets.append(labels)
 
             labels = labels.to(device)
             loss = args.loss_fn(audio_output, labels)
+            
             A_loss.append(loss.to('cpu').detach())
 
             batch_time.update(time.time() - end)
@@ -296,15 +313,19 @@ def validate(audio_model, val_loader, args, local_rank, output_pred=False):
         audio_output = torch.cat(A_predictions)
         target = torch.cat(A_targets)
         loss = np.mean(A_loss)
-        acc = calculate_acc(audio_output, target, k=1)
+        if return_ap:
+            metrics = calculate_mAP(audio_output, target)
+        else:
+            metrics = calculate_acc(audio_output, target, k=1)
         
+
         #stats = calculate_stats(audio_output, target)
 
     if output_pred == False:
-        return acc, loss
+        return metrics, loss
     else:
         # used for multi-frame evaluation (i.e., ensemble over frames), so return prediction and target
-        return acc, audio_output, target
+        return metrics, audio_output, target
     
 def calculate_acc(pred, target, k=1):
     """
@@ -335,3 +356,32 @@ def calculate_acc(pred, target, k=1):
             correct += 1
 
     return correct / pred.size(0)
+
+def calculate_mAP(pred, target):
+    """
+    Calculate mean average precision (mAP) for multi-label classification.
+
+    Args:
+        pred (Tensor): shape (N, C), model outputs (logits or probabilities)
+        target (Tensor): shape (N, C), one-hot or multi-hot ground truth (int or bool)
+
+    Returns:
+        float: mean average precision across all classes
+    """
+    pred = pred.detach().cpu().numpy()
+    target = target.detach().cpu().numpy()
+
+    target = (target > 0.5).astype(int)
+    pred_binary = (pred > 0.5).astype(np.float32)
+    recall = ((pred_binary * target).sum() / target.sum()).item()
+    print("Recall on train batch:", recall)
+    num_classes = pred.shape[1]
+    APs = []
+
+    for i in range(num_classes):
+        if target[:, i].sum() == 0:
+            continue  # 跳过没有正样本的类别
+        ap = average_precision_score(target[:, i], pred[:, i])
+        APs.append(ap)
+
+    return sum(APs) / len(APs) if APs else 0.0

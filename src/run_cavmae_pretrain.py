@@ -116,7 +116,7 @@ val_audio_conf = {'num_mel_bins': 128, 'target_length': args.target_length, 'fre
 print('current mae loss {:.3f}, and contrastive loss {:.3f}'.format(args.mae_loss_weight, args.contrast_loss_weight))
 
 
-
+print(args)
 if args.use_wandb and local_rank == 0:
         print("init wandb")
         if args.wandb_id != None:

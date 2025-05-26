@@ -1,4 +1,4 @@
-export CUDA_VISIBLE_DEVICES=3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 
 model=cav-mae-sync
@@ -33,7 +33,7 @@ exp_dir=./exp/trainmae-k700-${model}-lr${lr}-bs${batch_size}-norm${norm_pix_loss
 mkdir -p $exp_dir
 
 
-PYTHONWARNINGS=ignore torchrun --nproc_per_node=5 run_cavmae_pretrain.py --model ${model} --dataset ${dataset} \
+PYTHONWARNINGS=ignore torchrun --nproc_per_node=4 run_cavmae_pretrain.py --model ${model} --dataset ${dataset} \
 --data-train ${tr_data} --data-val ${te_data} --exp-dir $exp_dir \
 --label-csv ${label_csv} --n_class 700 \
 --lr $lr --n-epochs ${epoch} --batch-size $batch_size --save_model True \

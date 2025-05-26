@@ -43,7 +43,7 @@ parser.add_argument("--data-eval", type=str, default=None, help="evaluation data
 parser.add_argument("--label-csv", type=str, default='/data/wanglinge/project/cav-mae/src/data/info/k700_class.csv', help="csv with class labels")
 parser.add_argument("--n_class", type=int, default=700, help="number of classes")
 parser.add_argument("--model", type=str, default='cav-mae-ft', help="the model used")
-parser.add_argument("--dataset", type=str, default="audioset", help="the dataset used", choices=["audioset", "esc50", "speechcommands", "fsd50k", "vggsound", "epic", "k400"])
+parser.add_argument("--dataset", type=str, default="k700", help="the dataset used", choices=["audioset", "esc50", "speechcommands", "fsd50k", "vggsound", "epic", "k700"])
 parser.add_argument("--dataset_mean", type=float, help="the dataset mean, used for input normalization", default=-5.081)
 parser.add_argument("--dataset_std", type=float, help="the dataset std, used for input normalization", default=4.4849)
 parser.add_argument("--target_length", type=int, help="the input length in frames", default=1024)
@@ -97,9 +97,15 @@ parser.add_argument("--resume", action="store_true",
                         help="resume from a previous run")
 parser.add_argument("--pooling", action="store_true",
                         help="use pooling or not")
+parser.add_argument("--use_dist", default=True, type=bool, help="if use ddp" )
+parser.add_argument("--raw_data", type=str, default="k700", help="raw data of daataset")
 
 args = parser.parse_args()
 
+if args.raw_data == 'as':
+    args.modality = "audioonly"
+else:
+    args.modality = "both"
 def setup_for_distributed(is_master):
     """
     This function disables printing when not in master process
@@ -122,7 +128,11 @@ def setup_distributed(visible_devices):
     setup_for_distributed(local_rank == 0)
     return local_rank
 
-local_rank = setup_distributed(args.visible_gpus)
+if args.use_dist:
+    local_rank = setup_distributed(args.visible_gpus)
+else:
+    local_rank = 0
+
 if args.use_wandb and local_rank == 0:
         print("init wandb")
         if args.wandb_id != None:
@@ -158,7 +168,12 @@ val_audio_conf = {'num_mel_bins': 128, 'target_length': args.target_length, 'fre
 
 if args.model == 'cav-mae-ft':
     print('finetune a cav-mae model with 11 modality-specific layers and 1 modality-sharing layers')
-    audio_model = models.CAVMAE_k700_FT(label_dim=args.n_class,pooling=args.pooling, modality_specific_depth=11)
+    if args.raw_data == 'as':
+        audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11)
+    else:
+        audio_model = models.CAVMAE_k700_FT(label_dim=args.n_class,pooling=args.pooling, modality_specific_depth=11)
+    
+    args.align = False
 elif args.model == 'cav-mae-sync-ft':
     audio_model = models.CAVMAE_Sync_k700_FT(label_dim=args.n_class,pooling=args.pooling, audio_length=int(args.target_length * 0.4),  modality_specific_depth=11)
     args.align = True
@@ -174,21 +189,34 @@ if args.bal == 'bal':
     else:
         samples_weight = np.loadtxt(args.data_train[:-5] + '_' + args.weight_file + '.csv', delimiter=',')
     #sampler = WeightedRandomSampler(samples_weight, len(samples_weight), replacement=True)
-    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, vision="video", align=args.align)
-    sampler = DistributedSampler(train_set)
-    train_loader = torch.utils.data.DataLoader(
-        train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, vision="video", align=args.align, modality=args.modality, raw=args.raw_data)
+    if args.use_dist:
+        sampler = DistributedSampler(train_set)
+        train_loader = torch.utils.data.DataLoader(
+            train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+    else:
+        train_loader = torch.utils.data.DataLoader(
+            train_set, batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+
 else:
     print('balanced sampler is not used')
-    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, vision="video", align=args.align)
-    sampler = DistributedSampler(train_set)
-    train_loader = torch.utils.data.DataLoader(
-        train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, vision="video", align=args.align, modality=args.modality, raw=args.raw_data)
+    if args.use_dist:
+        sampler = DistributedSampler(train_set)
+        train_loader = torch.utils.data.DataLoader(
+            train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+    else:
+        train_loader = torch.utils.data.DataLoader(
+            train_set, batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
-val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf, vision="video", align=args.align)
-val_sampler = DistributedSampler(val_set)
-val_loader = torch.utils.data.DataLoader(
-    val_set, batch_size=10,sampler=val_sampler, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf, vision="video", align=args.align, modality=args.modality, raw=args.raw_data)
+if args.use_dist:
+    val_sampler = DistributedSampler(val_set)
+    val_loader = torch.utils.data.DataLoader(
+        val_set, batch_size=10,sampler=val_sampler, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+else:
+    val_loader = torch.utils.data.DataLoader(
+        val_set, batch_size=10, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
 if args.data_eval != None:
     eval_loader = torch.utils.data.DataLoader(
