@@ -31,8 +31,8 @@ batch_size=30
 label_smooth=0.1
 
 dataset=audioset
-tr_data=/data/wanglinge/project/cav-mae/src/data/info/k700_val.json
-te_data=/data/wanglinge/project/cav-mae/src/data/info/k700_test.json
+tr_data=/data/wanglinge/project/cav-mae/src/data/info/k700_val_2.json
+te_data=/data/wanglinge/project/cav-mae/src/data/info/k700_val_1.json
 label_csv=/data/wanglinge/project/cav-mae/src/data/info/k700_class.csv
 exp_dir=./exp/mae_ft_sync-all_frames-norm_${lr}-bs${batch_size}-lda${lr_adapt}-${ftmode}-fz${freeze_base}-h${head_lr}-a5
 cd /data/wanglinge/project/cav-mae/src

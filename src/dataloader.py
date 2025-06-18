@@ -1,4 +1,10 @@
 # -*- coding: utf-8 -*-
+# @Time    : 08/06/25 11:03 AM
+# @Author  : Linge Wang
+
+
+# original author info:
+# -*- coding: utf-8 -*-
 # @Time    : 6/19/21 12:23 AM
 # @Author  : Yuan Gong
 # @Affiliation  : Massachusetts Institute of Technology
@@ -12,7 +18,6 @@
 import csv
 import json
 import os.path
-
 import torchaudio
 import numpy as np
 import torch
@@ -78,6 +83,14 @@ class AudiosetDataset(Dataset):
         Dataset that manages audio recordings
         :param audio_conf: Dictionary containing the audio loading and preprocessing settings
         :param dataset_json_file
+
+
+        Additional Params:
+        :param modality: which modality to be loaded(audio, vision, both)
+        :param vision: form of vision modality(image / video)
+        :param align: whether to align the selected frame and the audio spectrum 
+        :param num_frames: frames of original video
+        :param raw: raw dataset: k700 / audioset 
         """
 
         self.raw = raw
@@ -392,9 +405,10 @@ if __name__ == '__main__':
     audio_conf = {'num_mel_bins': 128, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
               'noise':True, 'label_smooth': 0, 'im_res': 224}
     #dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700_val.json', audio_conf, label_csv='data/info/k700_class.csv', vision='video', align=True, modality='audioonly')
-    dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/as/data/balanced_train_segments_valid.json', audio_conf, 
-                              label_csv='/data/wanglinge/project/cav-mae/src/data/info/as/data/as_label.csv',  modality='audioonly', raw='as200k')
-
+    # dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/as/data/unbalanced_train_segments_valid.json', audio_conf, 
+    #                           label_csv='/data/wanglinge/project/cav-mae/src/data/info/as/data/as_label.csv',  modality='audioonly', raw='as200k')
+    dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700_val_2.json', audio_conf, 
+                               label_csv='/data/wanglinge/project/cav-mae/src/data/info/k700_class.csv',  modality='both', raw='k700', vision='video')
     print('dataset length is {:d}'.format(len(dataset)))
     loader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=False, num_workers=0)
     from models.cav_mae import CAVMAE_k700_FT, CAVMAE_Sync_k700_FT, CAVMAEFT
@@ -406,11 +420,12 @@ if __name__ == '__main__':
     for i, (fbank, image, label_indices) in enumerate(loader):
         print(fbank.shape)
         print(image.shape)
-        print(torch.sum(label_indices, dim=1))
-        pred = model(fbank, image, mode='audioonly')
-        pred_loss = loss(pred, label_indices)
-        print(pred.shape)
-        print(pred_loss)
+        print(label_indices.shape)
+        # print(torch.sum(label_indices, dim=1))
+        # pred = model(fbank, image, mode='audioonly')
+        # pred_loss = loss(pred, label_indices)
+        # print(pred.shape)
+        # print(pred_loss)
         #pred = model(fbank, image)
         # print(pred.shape)
         # print(image.shape)

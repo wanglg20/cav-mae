@@ -191,7 +191,7 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
             early_print_step = epoch == 0 and global_step % (args.n_print_steps/10) == 0
             print_step = print_step or early_print_step
 
-            
+            #print_step = True
             if print_step and global_step != 0:
                 print('Epoch: [{0}][{1}/{2}]\t'
                   'Per Sample Total Time {per_sample_time.avg:.5f}\t'
@@ -214,8 +214,6 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
             acc, valid_loss =  validate(audio_model, test_loader, args, local_rank=local_rank)
             print("acc: {:.6f}".format(acc))
             if acc > best_acc:
-                best_acc = acc
-                if main_metrics == 'acc':
                     best_epoch = epoch
         else:
             mAP, valid_loss = validate(audio_model, test_loader, args, local_rank=local_rank, return_ap=True)
@@ -224,6 +222,11 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
                 best_mAP = mAP
                 if main_metrics == 'mAP':
                     best_epoch = epoch
+        # if main_metrics == 'mAP':
+        #     mAP, valid_loss = validate(audio_model, test_loader, args, local_rank=local_rank, return_ap=True)
+        #     print("mAP:{:.6f}".format(mAP))
+        #     if mAP > best_mAP:
+        #         best_epoch = epoch
         # stats, valid_loss = validate(audio_model, test_loader, args, local_rank)
 
         # mAP = np.mean([stat['AP'] for stat in stats])
@@ -243,16 +246,16 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
                 wandb.log({
                     'valid_loss': valid_loss,
                     'epoch': epoch,
-                    'mAP': mAP if main_metrics == 'mAP' else None,
+                    #'mAP': mAP if main_metrics == 'mAP' else None,
                     'acc': acc if main_metrics == 'acc' else None,
                 })
-
-
 
         if best_epoch == epoch:
             torch.save(audio_model.state_dict(), "%s/models/best_audio_model.pth" % (exp_dir))
             torch.save(optimizer.state_dict(), "%s/models/best_optim_state.pth" % (exp_dir))
         save_interval = 5
+        if args.use_video:
+            save_interval = 1
         if args.save_model == True and (epoch % save_interval == 0 or epoch == args.n_epochs):
             torch.save(audio_model.state_dict(), "%s/models/audio_model.%d.pth" % (exp_dir, epoch))
 
@@ -298,7 +301,7 @@ def validate(audio_model, val_loader, args, local_rank, output_pred=False, retur
             with autocast():
                 audio_output = audio_model(a_input, v_input, args.ftmode)
             predictions = audio_output.to('cpu').detach()
-            # predictions = torch.sigmoid(audio_output.float())
+            predictions = torch.sigmoid(audio_output.float())
             A_predictions.append(predictions)
             A_targets.append(labels)
 

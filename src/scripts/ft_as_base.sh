@@ -6,7 +6,7 @@ ftmode=audioonly
 # you can replace with any checkpoint you want, but by default, we use cav-mae-scale++
 cur_dir=$(pwd)
 pretrain_path=/data/wanglinge/project/cav-mae/src/exp/trainmae-audioset-cav-mae-lr5e-5-bs60-normFalse-c0.01-p1.0-tpFalse-mr-unstructured-0.75/models/audio_model.25.pth
-pretrain_path=/data/wanglinge/project/cav-mae/src/weight/official_release/audio_model.21.pth
+#pretrain_path=/data/wanglinge/project/cav-mae/src/weight/official_release/audio_model.21.pth
 freeze_base=False
 head_lr=100 # newly initialized ft layers uses 100 times larger than the base lr
 
@@ -23,7 +23,7 @@ lr_adapt=False
 dataset_mean=-5.081
 dataset_std=4.4849
 target_length=1024
-noise=True
+noise=False
 freqm=48
 timem=192
 mixup=0.0
@@ -32,9 +32,9 @@ label_smooth=0.1
 
 dataset=audioset
 tr_data=/data/wanglinge/project/cav-mae/src/data/info/as/data/balanced_train_segments_valid.json
-te_data=/data/wanglinge/project/cav-mae/src/data/info/as/data/eval_segments_valid.json
+te_data=/data/wanglinge/project/cav-mae/src/data/info/as/data/eval_segments_valid_1.json
 label_csv=/data/wanglinge/project/cav-mae/src/data/info/as/data/as_label.csv
-exp_dir=./exp/cav_ft_official_as_nosigmoid-noise_${noise}_lr_${lr}-bs${batch_size}-h${head_lr}
+exp_dir=./exp/cav_ft_official_as_noaug_sigmoid_part_${noise}_lr_${lr}-bs${batch_size}-h${head_lr}
 cd /data/wanglinge/project/cav-mae/src
 mkdir -p $exp_dir
 
@@ -53,4 +53,4 @@ PYTHONWARNINGS=ignore torchrun --master_port=29505 --nproc_per_node=4 run_cavmae
 --freeze_base ${freeze_base} --head_lr ${head_lr} \
 --num-workers 4 --pooling --use_dist True \
 --raw_data as \
---use_wandb --wandb_run_name cav_official_weight_ft_as
+--use_wandb --wandb_run_name cav_official_weight_ft_as_nosigmoid_noaug

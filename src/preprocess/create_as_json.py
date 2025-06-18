@@ -2,11 +2,11 @@ import csv
 import json
 import os
 
-target_audio_dir = "/data/wanglinge/dataset/audioset/raw_data/bal_train/audio/bal_train" 
+target_audio_dir = "/data/wanglinge/dataset/audioset/raw_data/unbal_train/audio/unbal_train" 
 
 # 输入CSV和输出JSON文件路径
-input_csv = "/data/wanglinge/project/cav-mae/src/data/info/as/data/balanced_train_segments.csv"
-output_json = "/data/wanglinge/project/cav-mae/src/data/info/as/data/balanced_train_segments.json"
+input_csv = "/data/wanglinge/project/cav-mae/src/data/info/as/data/unbalanced_train_segments.csv"
+output_json = "/data/wanglinge/project/cav-mae/src/data/info/as/data/unbalanced_train_segments.json"
 
 data_list = []
 

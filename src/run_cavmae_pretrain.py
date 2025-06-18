@@ -44,6 +44,8 @@ def setup_for_distributed(is_master):
 
 def setup_distributed(visible_devices):
     #os.environ["CUDA_VISIBLE_DEVICES"] = visible_devices
+    # available gpus:
+    print("available gpus: ", visible_devices)
     dist.init_process_group(backend="nccl")
     local_rank = int(os.environ["RANK"])
     torch.cuda.set_device(local_rank)
@@ -104,6 +106,8 @@ parser.add_argument("--wandb_id", type=str, default=None,
                         help="wandb id if resuming from a previous run")                        
 parser.add_argument("--resume", action="store_true",
                         help="resume from a previous run")
+parser.add_argument("--use_video", action="store_true",
+                        help="use video input or not")
 args = parser.parse_args()
 im_res = 224
 
@@ -131,12 +135,14 @@ if args.use_wandb and local_rank == 0:
                 job_type="training",
                 reinit=True)
         else:
+            os.environ["WANDB_DIR"] = "./wandb_offline"
             wandb.init( project=args.wandb_project_name,
                entity='wanglg-institude-of-automation-cas',
                notes=socket.gethostname(),
                name='cav_1',
                job_type="training",
-               reinit=True)
+               reinit=True,
+               mode="offline" )
         if args.wandb_run_name != None:
             wandb.run.name = args.wandb_run_name
         wandb.config.update(args)
@@ -144,7 +150,7 @@ if args.use_wandb and local_rank == 0:
 
 if args.model == 'cav-mae':
     print('pretrain a cav-mae model with 11 modality-specific layers and 1 modality-sharing layers')
-    audio_model = models.CAVMAE(audio_length=args.target_length, norm_pix_loss=args.norm_pix_loss, modality_specific_depth=11, tr_pos=args.tr_pos)
+    audio_model = models.CAVMAE(audio_length=args.target_length, norm_pix_loss=args.norm_pix_loss, modality_specific_depth=11, tr_pos=args.tr_pos, video_input=args.use_video)
     args.align = False
 elif args.model == 'cav-mae-sync':
     audio_model = models.CAVMAE_Sync(audio_length=int(args.target_length * 0.4), norm_pix_loss=args.norm_pix_loss, modality_specific_depth=11, tr_pos=args.tr_pos)
@@ -152,7 +158,10 @@ elif args.model == 'cav-mae-sync':
 else:
     raise ValueError('model not supported')
 
-
+if args.use_video:
+    vision = "video"
+else:
+    vision = "image"
 if args.bal == 'bal':
     print('balanced sampler is being used')
     if args.weight_file == None:
@@ -160,19 +169,19 @@ if args.bal == 'bal':
     else:
         samples_weight = np.loadtxt(args.data_train[:-5] + '_' + args.weight_file + '.csv', delimiter=',')
     #sampler = WeightedRandomSampler(samples_weight, len(samples_weight), replacement=True)
-    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, align=args.align)
+    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, align=args.align, vision=vision)
     sampler = DistributedSampler(train_set)
     train_loader = torch.utils.data.DataLoader(
         train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 else:
     print('balanced sampler is not used')
-    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, align=args.align)
+    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, align=args.align, vision=vision)
     sampler = DistributedSampler(train_set)
     train_loader = torch.utils.data.DataLoader(
     train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
 
-val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf, align=args.align)
+val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, audio_conf=val_audio_conf, align=args.align, vision=vision)
 val_sampler = DistributedSampler(val_set)
 val_loader = torch.utils.data.DataLoader(
     val_set, batch_size=10, sampler = val_sampler, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)

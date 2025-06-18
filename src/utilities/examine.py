@@ -2,8 +2,8 @@ import json
 import os
 
 # 输入输出 JSON 文件路径
-input_json = "/data/wanglinge/project/cav-mae/src/data/info/as/data/eval_segments.json"
-output_json = "/data/wanglinge/project/cav-mae/src/data/info/as/data/eval_segments_valid.json"
+input_json = "/data/wanglinge/project/cav-mae/src/data/info/as/data/unbalanced_train_segments.json"
+output_json = "/data/wanglinge/project/cav-mae/src/data/info/as/data/unbalanced_train_segments_valid.json"
 
 # 加载原始 JSON
 with open(input_json, 'r', encoding='utf-8') as f:

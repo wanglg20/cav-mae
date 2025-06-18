@@ -99,6 +99,8 @@ parser.add_argument("--pooling", action="store_true",
                         help="use pooling or not")
 parser.add_argument("--use_dist", default=True, type=bool, help="if use ddp" )
 parser.add_argument("--raw_data", type=str, default="k700", help="raw data of daataset")
+parser.add_argument("--use_video", action="store_true",
+                        help="use video input or not")
 
 args = parser.parse_args()
 
@@ -147,12 +149,20 @@ if args.use_wandb and local_rank == 0:
                 job_type="training",
                 reinit=True)
         else:
-            wandb.init(project=args.wandb_project_name,
-                   entity='wanglg-institude-of-automation-cas',
-                   notes=socket.gethostname(),
-                   name='cav_1',
-                   job_type="training",
-                   reinit=True)
+            # wandb.init(project=args.wandb_project_name,
+            #        entity='wanglg-institude-of-automation-cas',
+            #        notes=socket.gethostname(),
+            #        name='cav_1',
+            #        job_type="training",
+            #        reinit=True)
+            os.environ["WANDB_DIR"] = "./wandb_offline"
+            wandb.init( project=args.wandb_project_name,
+               entity='wanglg-institude-of-automation-cas',
+               notes=socket.gethostname(),
+               name='cav_1',
+               job_type="training",
+               reinit=True,
+               mode="offline" )
         if args.wandb_run_name != None:
             wandb.run.name = args.wandb_run_name
         wandb.config.update(args)
@@ -166,10 +176,11 @@ audio_conf = {'num_mel_bins': 128, 'target_length': args.target_length, 'freqm':
 val_audio_conf = {'num_mel_bins': 128, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': 0, 'dataset': args.dataset,
                   'mode':'eval', 'mean': args.dataset_mean, 'std': args.dataset_std, 'noise': False, 'im_res': im_res}
 
+print("args:", args.model)
 if args.model == 'cav-mae-ft':
     print('finetune a cav-mae model with 11 modality-specific layers and 1 modality-sharing layers')
     if args.raw_data == 'as':
-        audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11)
+        audio_model = models.CAVMAEFT(label_dim=args.n_class, modality_specific_depth=11, video_input=args.use_video)
     else:
         audio_model = models.CAVMAE_k700_FT(label_dim=args.n_class,pooling=args.pooling, modality_specific_depth=11)
     

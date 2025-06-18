@@ -70,12 +70,17 @@ class CAVMAE(nn.Module):
     def __init__(self, img_size=224, audio_length=1024, patch_size=16, in_chans=3,
                  embed_dim=768, modality_specific_depth=11, num_heads=12,
                  decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
-                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=False):
+                 mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=False, video_input=False, frames=10):
         super().__init__()
         print('A CAV-MAE Model')
         print('Use norm_pix_loss: ', norm_pix_loss)
         print('Learnable Positional Embedding: ', tr_pos)
-
+        self.use_video = video_input
+        if video_input:
+            print("using {} frames video as input".format(frames))
+            self.frames = frames
+        else:
+            self.frames = 1
         # the encoder part
         # overide the timm package
         timm.models.vision_transformer.PatchEmbed = PatchEmbed
@@ -91,7 +96,7 @@ class CAVMAE(nn.Module):
         self.modality_v = nn.Parameter(torch.zeros(1, 1, embed_dim))
 
         self.pos_embed_a = nn.Parameter(torch.zeros(1, self.patch_embed_a.num_patches, embed_dim), requires_grad=tr_pos)  # fixed sin-cos embedding
-        self.pos_embed_v = nn.Parameter(torch.zeros(1, self.patch_embed_v.num_patches, embed_dim), requires_grad=tr_pos)  # fixed sin-cos embedding
+        self.pos_embed_v = nn.Parameter(torch.zeros(1, self.patch_embed_v.num_patches * self.frames, embed_dim), requires_grad=tr_pos)  # fixed sin-cos embedding
 
         # audio-branch
         self.blocks_a = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(modality_specific_depth)])
@@ -114,7 +119,7 @@ class CAVMAE(nn.Module):
         self.decoder_modality_v = nn.Parameter(torch.zeros(1, 1, decoder_embed_dim))
 
         self.decoder_pos_embed_a = nn.Parameter(torch.zeros(1, self.patch_embed_a.num_patches, decoder_embed_dim), requires_grad=tr_pos)  # fixed sin-cos embedding
-        self.decoder_pos_embed_v = nn.Parameter(torch.zeros(1, self.patch_embed_v.num_patches, decoder_embed_dim), requires_grad=tr_pos)  # fixed sin-cos embedding
+        self.decoder_pos_embed_v = nn.Parameter(torch.zeros(1, self.patch_embed_v.num_patches * self.frames, decoder_embed_dim), requires_grad=tr_pos)  # fixed sin-cos embedding
 
         self.decoder_blocks = nn.ModuleList([Block(decoder_embed_dim, decoder_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(decoder_depth)])
 
@@ -137,13 +142,13 @@ class CAVMAE(nn.Module):
         pos_embed_a = get_2d_sincos_pos_embed(self.pos_embed_a.shape[-1], 8, int(self.patch_embed_a.num_patches/8), cls_token=False)
         self.pos_embed_a.data.copy_(torch.from_numpy(pos_embed_a).float().unsqueeze(0))
 
-        pos_embed_v = get_2d_sincos_pos_embed(self.pos_embed_v.shape[-1], int(self.patch_embed_v.num_patches ** .5), int(self.patch_embed_v.num_patches ** .5), cls_token=False)
+        pos_embed_v = get_2d_sincos_pos_embed(self.pos_embed_v.shape[-1], int(self.patch_embed_v.num_patches ** .5) * self.frames, int(self.patch_embed_v.num_patches ** .5), cls_token=False)
         self.pos_embed_v.data.copy_(torch.from_numpy(pos_embed_v).float().unsqueeze(0))
 
         decoder_pos_embed_a = get_2d_sincos_pos_embed(self.decoder_pos_embed_a.shape[-1], 8, int(self.patch_embed_a.num_patches/8), cls_token=False)
         self.decoder_pos_embed_a.data.copy_(torch.from_numpy(decoder_pos_embed_a).float().unsqueeze(0))
 
-        decoder_pos_embed_v = get_2d_sincos_pos_embed(self.decoder_pos_embed_v.shape[-1], int(self.patch_embed_v.num_patches ** .5), int(self.patch_embed_v.num_patches ** .5), cls_token=False)
+        decoder_pos_embed_v = get_2d_sincos_pos_embed(self.decoder_pos_embed_v.shape[-1], int(self.patch_embed_v.num_patches ** .5) * self.frames, int(self.patch_embed_v.num_patches ** .5), cls_token=False)
         self.decoder_pos_embed_v.data.copy_(torch.from_numpy(decoder_pos_embed_v).float().unsqueeze(0))
 
         # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
@@ -184,6 +189,7 @@ class CAVMAE(nn.Module):
 
     def unpatchify(self, x, c, h, w, p=16):
         """
+
         x: (N, L, patch_size**2 *3)
         imgs: (N, 3, H, W)
         """
@@ -278,7 +284,14 @@ class CAVMAE(nn.Module):
         a = a + self.pos_embed_a
         a = a + self.modality_a
 
+        if self.use_video:
+           B, T, C, H, W = v.shape
+           v = v.view(B * T, C, H, W)
         v = self.patch_embed_v(v)
+        B2, N, D = v.shape
+        if self.use_video:
+            v = v.view(B, T, N, D)
+            v = v.reshape(B, T*N, D)
         v = v + self.pos_embed_v
         v = v + self.modality_v
 
@@ -379,18 +392,25 @@ class CAVMAE(nn.Module):
             # for audio, need to adjust the shape
             input = input.unsqueeze(1)
             input = input.transpose(2, 3)
-            # patch: 1, 8, 64, 16
+            # patch target: 1, 8, 64, 16
             target = self.patchify(input, 1, int(input.shape[2]/self.patch_embed_a.patch_size[0]), int(input.shape[3]/self.patch_embed_a.patch_size[1]), 16)
         elif modality == 'v':
-            # 3, 14, 14, 16
+            if self.use_video:
+                B, T, C, H, W = input.shape
+                input = input.view(B * T, C, H, W)
+            # patchify param: 3, 14, 14, 16; 14 = 224 / 16
             target = self.patchify(input, 3, int(input.shape[2]/self.patch_embed_v.patch_size[0]), int(input.shape[3]/self.patch_embed_v.patch_size[1]), 16)
+            if self.use_video:
 
+                target = target.view(B, T, target.shape[1], target.shape[2])
+                B, T, N, D = target.shape
+                target = target.reshape(B, T * N, D)
         # patch-wise normalization might minorly improve the classification performance, but will make the model lose inpainting function
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True)
             target = (target - mean) / (var + 1.e-6) ** .5
-
+        
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
 
@@ -461,11 +481,18 @@ class CAVMAE(nn.Module):
 
 # the finetuned CAV-MAE model
 class CAVMAEFT(nn.Module):
-    def __init__(self, label_dim, img_size=224, audio_length=1024, patch_size=16, in_chans=3,
-                 embed_dim=768, modality_specific_depth=11, num_heads=12, mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=True):
+    def __init__(self, label_dim, img_size=224, audio_length=1024, patch_size=16, in_chans=3, 
+                 embed_dim=768, modality_specific_depth=11, num_heads=12, mlp_ratio=4., 
+                 norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=True, video_input=False, frames=10):
         super().__init__()
         timm.models.vision_transformer.Block = Block
         print('Use norm_pix_loss: ', norm_pix_loss)
+        self.use_video = video_input
+        if video_input:
+            print("using {} frames video as ft input".format(frames))
+            self.frames = frames
+        else:
+            self.frames = 1
 
         timm.models.vision_transformer.PatchEmbed = PatchEmbed
         timm.models.vision_transformer.Block = Block
@@ -480,7 +507,7 @@ class CAVMAEFT(nn.Module):
         self.modality_v = nn.Parameter(torch.zeros(1, 1, embed_dim))
 
         self.pos_embed_a = nn.Parameter(torch.zeros(1, self.patch_embed_a.num_patches, embed_dim), requires_grad=tr_pos)  # fixed sin-cos embedding
-        self.pos_embed_v = nn.Parameter(torch.zeros(1, self.patch_embed_v.num_patches, embed_dim), requires_grad=tr_pos)  # fixed sin-cos embedding
+        self.pos_embed_v = nn.Parameter(torch.zeros(1, self.patch_embed_v.num_patches * self.frames, embed_dim), requires_grad=tr_pos)  # fixed sin-cos embedding
 
         self.blocks_a = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(modality_specific_depth)])
         self.blocks_v = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer) for i in range(modality_specific_depth)])
@@ -508,8 +535,11 @@ class CAVMAEFT(nn.Module):
         pos_embed_a = get_2d_sincos_pos_embed(self.pos_embed_a.shape[-1], 4, int(self.patch_embed_a.num_patches/4), cls_token=False)
         self.pos_embed_a.data.copy_(torch.from_numpy(pos_embed_a).float().unsqueeze(0))
 
-        pos_embed_v = get_2d_sincos_pos_embed(self.pos_embed_v.shape[-1], int(self.patch_embed_v.num_patches ** .5), int(self.patch_embed_v.num_patches ** .5), cls_token=False)
+        pos_embed_v = get_2d_sincos_pos_embed(self.pos_embed_v.shape[-1], int(self.patch_embed_v.num_patches ** .5) * self.frames, int(self.patch_embed_v.num_patches ** .5), cls_token=False)
+        #pos_embed_v = get_2d_sincos_pos_embed(self.pos_embed_v.shape[-1], int(self.patch_embed_v.num_patches ** .5) * self.frames, int(self.patch_embed_v.num_patches ** .5), cls_token=False)
+
         self.pos_embed_v.data.copy_(torch.from_numpy(pos_embed_v).float().unsqueeze(0))
+
 
         w = self.patch_embed_a.proj.weight.data
         torch.nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
@@ -706,12 +736,13 @@ class CAVMAEFT(nn.Module):
 # --------------------------------------------------------
 class CAVMAE_k700_FT(CAVMAEFT):
     def __init__(self, label_dim, softmax= False, pooling=True,img_size=224, audio_length=1024, patch_size=16, in_chans=3,
-                 embed_dim=768, modality_specific_depth=11, num_heads=12, mlp_ratio=4., norm_layer=nn.LayerNorm, norm_pix_loss=False, tr_pos=True):
+                 embed_dim=768, modality_specific_depth=11, num_heads=12, mlp_ratio=4., norm_layer=nn.LayerNorm,
+                   norm_pix_loss=False, tr_pos=True, video_input=True):
         
         self.pooling = pooling
         self.softmax = softmax
         super().__init__(label_dim, img_size, audio_length, patch_size, in_chans,
-                         embed_dim, modality_specific_depth, num_heads, mlp_ratio, norm_layer, norm_pix_loss, tr_pos)
+                         embed_dim, modality_specific_depth, num_heads, mlp_ratio, norm_layer, norm_pix_loss, tr_pos, video_input=video_input)
 
         
     def forward(self, a, v, mode=None):
@@ -720,41 +751,65 @@ class CAVMAE_k700_FT(CAVMAEFT):
         a: audio input, shape [B, 1, 1024, 128]
         v: video input, shape [B, 10, 3, 224, 224]
         """
-        a = a.unsqueeze(1)
-        a = a.transpose(2, 3)
-        a = self.patch_embed_a(a)
-        a = a + self.pos_embed_a
-        a = a + self.modality_a
-        for blk in self.blocks_a:
-                a = blk(a)
-
-        # video input
-        B, T, C, H, W = v.shape
-        v = v.reshape(B * T, C, H, W)
-        v = self.patch_embed_v(v)
-        v = v + self.pos_embed_v
-        v = v + self.modality_v
-        for blk in self.blocks_v:
-                v = blk(v)
-        _, N, C = v.shape
-        if self.pooling:
-            v = v.reshape(B, T, N, C)
-            v = v.mean(dim=1) # global average pooling
-        else:
-            v = v.reshape(B, T*N, C) # use all vision tokens
-
-
-        x = torch.cat((a, v), dim=1)
-        for blk in self.blocks_u:
-            x = blk(x)
-        x = self.norm(x)
-
-        x = x.mean(dim=1)
-        x = self.mlp_head(x)
-        if self.softmax:
-            x = torch.nn.functional.softmax(x, dim=-1)
+        if mode =='audioonly':
+            a = a.unsqueeze(1)
+            a = a.transpose(2, 3)
+            a = self.patch_embed_a(a)
+            a = a + self.pos_embed_a
+            a = a + self.modality_a
+            for blk in self.blocks_a:
+                    a = blk(a)
+            x = a
+            for blk in self.blocks_u:
+                x = blk(x)
+            x = self.norm(x)
+            x = x.mean(dim=1)
+            x = self.mlp_head(x)
+            # if self.softmax:
+            #     x = torch.nn.functional.softmax(x, dim=-1)
+            return x
         
-        return x
+        else: 
+            a = a.unsqueeze(1)
+            a = a.transpose(2, 3)
+            a = self.patch_embed_a(a)
+            a = a + self.pos_embed_a
+            a = a + self.modality_a
+            for blk in self.blocks_a:
+                    a = blk(a)
+
+
+            if self.use_video:
+            # video input
+                B, T, C, H, W = v.shape
+                v = v.reshape(B * T, C, H, W)
+                v = self.patch_embed_v(v)
+                B2, N, D = v.shape
+                v = v.view(B, T, N, D)
+                v = v.reshape(B, T*N, D)
+                v = v + self.pos_embed_v
+                v = v + self.modality_v
+                for blk in self.blocks_v:
+                        v = blk(v)
+                _, N, C = v.shape
+                if self.pooling:
+                    v = v.reshape(B, T, -1, C)
+                    v = v.mean(dim=1) # global average pooling
+                else:
+                    v = v.reshape(B, T*N, C) # use all vision tokens
+    
+
+            x = torch.cat((a, v), dim=1)
+            for blk in self.blocks_u:
+                x = blk(x)
+            x = self.norm(x)
+
+            x = x.mean(dim=1)
+            x = self.mlp_head(x)
+            if self.softmax:
+                x = torch.nn.functional.softmax(x, dim=-1)
+
+            return x
 
 
 
@@ -965,6 +1020,7 @@ class CAVMAE_Sync_k700_FT(CAVMAEFT):
         pos_embed_a = get_2d_sincos_pos_embed(self.register_pos_embed_a.shape[-1], 8, int(self.num_register_token/8), cls_token=False)
         self.register_pos_embed_a.data.copy_(torch.from_numpy(pos_embed_a).float().unsqueeze(0))
         pos_embed_v = get_2d_sincos_pos_embed(self.register_pos_embed_v.shape[-1], 8, int(self.num_register_token/8), cls_token=False)
+        
         self.register_pos_embed_v.data.copy_(torch.from_numpy(pos_embed_v).float().unsqueeze(0))
 
         torch.nn.init.normal_(self.global_token_a, std=.02)
@@ -1047,5 +1103,14 @@ class CAVMAE_Sync_k700_FT(CAVMAEFT):
             if self.softmax:
                 x = torch.nn.functional.softmax(x, dim=-1)
             return x
+        
+
+# --------------------------------
+# moidified CAVMAE for video input
+# --------------------------------
+
+
+
+
 # if __name__ =='__main__':
 #     model = CAVMAE_Sync(img_size=224, audio_length=400, patch_size=16, in_chans=3,)
