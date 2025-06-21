@@ -129,6 +129,8 @@ class CrossMamba(nn.Module):
         )
 
         # Mamba parameters
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+        inter_dpr = [0.0] + dpr
         self.residual_in_fp32 = residual_in_fp32
         self.fused_add_norm = fused_add_norm
         self.bimamba = bimamba
@@ -144,7 +146,7 @@ class CrossMamba(nn.Module):
                     layer_idx=i,
                     bimamba=bimamba,
                     drop_path=inter_dpr[i],
-                    **factory_kwargs,
+                    #**factory_kwargs,
                 )
                 for i in range(depth)
             ]
@@ -157,8 +159,6 @@ class CrossMamba(nn.Module):
         self.depth = depth
         self.num_frames = num_frames
         
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
-        inter_dpr = [0.0] + dpr
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
         
         # cls token and position embedding
@@ -183,14 +183,10 @@ class CrossMamba(nn.Module):
         self.pos_embed_a = nn.Parameter(torch.zeros(1, self.num_patches_a, embed_dim))
         self.temporal_pos_embed_v = nn.Parameter(torch.zeros(1, num_frames // kernel_size, embed_dim))
         self.temporal_pos_embed_a = nn.Parameter(torch.zeros(1, num_frames // kernel_size, embed_dim))
-        pos_embed_v = get_sinusoid_encoding_table(
-            self.num_patches_v, embed_dim, cls_token=True
-        )
-        pos_embed_a = get_sinusoid_encoding_table(
-            self.num_patches_a, embed_dim, cls_token=True
-        )
-        self.pos_embed_v.data.copy_(torch.from_numpy(pos_embed_v).float())
-        self.pos_embed_a.data.copy_(torch.from_numpy(pos_embed_a).float())
+        pos_embed_v = get_sinusoid_encoding_table(self.num_patches_v, embed_dim)
+        pos_embed_a = get_sinusoid_encoding_table(self.num_patches_a, embed_dim)
+        self.pos_embed_v.data.copy_(pos_embed_v.float())
+        self.pos_embed_a.data.copy_(pos_embed_a.float())
         self.temporal_pos_embed_v.data.copy_(torch.zeros(1, num_frames // kernel_size, embed_dim).float())
         self.temporal_pos_embed_a.data.copy_(torch.zeros(1, num_frames // kernel_size, embed_dim).float())
 
