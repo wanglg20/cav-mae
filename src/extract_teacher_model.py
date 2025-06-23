@@ -2,15 +2,12 @@ import torch
 from collections import OrderedDict
 import numpy as np
 from transformers import CLIPModel, CLIPProcessor, ClapModel, ClapProcessor
-from sklearn.metrics.pairwise import cosine_similarity
 import os
-
-
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 clap_model = ClapModel.from_pretrained("laion/clap-htsat-fused").to(device)
-print(clap_model.state_dict().keys())
+# print(clap_model.state_dict().keys())
 new_state_dict = OrderedDict()
 path = 'weight/teacher'
 # 提取 'audio_model' 部分的所有权重

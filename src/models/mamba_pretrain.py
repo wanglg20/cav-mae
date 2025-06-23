@@ -98,7 +98,7 @@ class CrossMamba(nn.Module):
             norm_epsilon=1e-5,
             # CLIP and clap decoder parameters# clip,
             clip_decoder_embed_dim=768,
-            clap_output_dim=512,
+            clap_output_dim=768,
             clip_output_dim=512,
             clip_norm_type='l2',
             clip_return_layer=1,
@@ -338,38 +338,68 @@ class CrossMamba(nn.Module):
         return x_clip_vis
     
 
-    def forward(self, x_v: Tensor, x_a: Tensor, mask=None) -> dict:
+    def forward(self, x_v: Tensor, x_a: Tensor, mask=None, mask_ratio = 0.75) -> dict:
         """
         Args:
             x_v (Tensor): Video input of shape [B, C, T, H, W].
             x_a (Tensor): Audio input of shape [B, num_bins, T].
             mask (Tensor, optional): Mask of shape [B, T*(1+N_v+2+N_a+1)], where N_v is the number of video patches and N_a is the number of audio patches.
                 ensuring that the cls token and global token are always visible.
+                one represent invisible, zero represent visible.
         Returns:
             feat_v (Tensor): Video features of shape [B, K, N_v+1, C_d_clip], where K is the number of layers to return. K=1 as default
             feat_a (Tensor): Audio features of shape [B, K, N_a+1, C_d_clap].
             glbal_feat_v (Tensor): Global video features of shape [B, T, C_d_clip].
             glbal_feat_a (Tensor): Global audio features of shape [B, T, C_d_clap].                               
         """
-        
-        x_vis = self.forward_features(x_v, x_a, mask)     # Student features， B, T*(1+N_v+N_a), d
+        B, N_m = mask.shape
+        x_vis = self.forward_features(x_v, x_a, mask)     # Student features， B, T*(1+N_v+N_a), d, (1, 1, 550, 768)
+        K, B, N_vis, D = x_vis.shape  # K represent the number of student layers to align with CLIP
+        T = self.num_frames
+        mask = mask.reshape(B, T, -1)
+        mask_v = mask[:, :, 1:self.num_patches_v + 1]   # B, T, N_v (1, 10, 196)
+        mask_a = mask[:, :, self.num_patches_v + 3:-1]  # B, T, N_a
+        global_v = mask[:, :, self.num_patches_v + 1]  # B, T, 1
+        global_a = mask[:, :, -1]  # B, T, 1
 
+        num_mask_v = int(mask_v.sum(dim=-1)[0, 0])
+        num_mask_a = int(mask_a.sum(dim=-1)[0, 0])
+        num_visible_v_per_frame = self.num_patches_v - num_mask_v
+        num_visible_a_per_frame = self.num_patches_a - num_mask_a
         
+        x_vis = x_vis.reshape(K*B, T, -1, self.embed_dim)  # B, T, N+1, d
+        v_vis = x_vis[:, :, 1:num_visible_v_per_frame+1]   # B, T, 49, 768
+        a_vis = x_vis[:, :, num_visible_v_per_frame+3:-1]
+
+        _, T, N_vv, C_CLIP = v_vis.shape
+        _, T, N_va, C_CLAP = a_vis.shape
+        v_vis = v_vis.reshape(B, -1, C_CLIP)  # B, T*N_vv, C_CLIP
+        a_vis = a_vis.reshape(B, -1, C_CLAP)
         # align CLIP and ClAP
-        K, B, _, C_CLIP = x_vis.shape              # K represent the number of student layers to align with CLIP
+        # K, B, _, C_CLIP = x_vis.shape              # K represent the number of student layers to align with CLIP
         expand_clip_pos_embed = self.clip_pos_embed.repeat(B, 1, 1).type_as(x_v).to(x_v.device).clone().detach()
-        # 
-        # one = torch.ones((B, 1), device=mask.device, dtype=mask.dtype) # cls token is always visible
-        # mask = torch.cat((one, mask), dim=1) # [B, N+1, C_d_clip]
-        clip_pos_emd_vis = expand_clip_pos_embed[~mask].view(B, -1, C_CLIP).unsqueeze(0).repeat(K, 1, 1, 1)
-        x_clip_full = x_vis + clip_pos_emd_vis # [K, B, N, C_d_clip]
+        mask_v = mask_v.flatten(1)
+        mask_a = mask_a.flatten(1)
+        clip_pos_embed_vis = expand_clip_pos_embed[~mask_v].view(B, -1, C_CLIP).unsqueeze(0).repeat(K, 1, 1, 1)
+        x_clip_full = v_vis + clip_pos_embed_vis # [K, B, N, C_d_clip]
+
+        expand_clap_pos_embed = self.clap_pos_embed.repeat(B, 1, 1).type_as(x_v).to(x_v.device).clone().detach()
+        clap_pos_embed_vis = expand_clap_pos_embed[~mask_a].view(B, -1, C_CLAP).unsqueeze(0).repeat(K, 1, 1, 1)
+        x_clap_full = a_vis + clap_pos_embed_vis # [K, B, N, C_d_clap]
+
 
         x_clip = []
         for idx, clip_decoder in enumerate(self.clip_decoder):
             x_clip.append(clip_decoder(x_clip_full[idx]))
         x_clip = torch.stack(x_clip) # align and normalize
 
-        return x_clip
+        x_clap = []
+        for idx, clap_decoder in enumerate(self.clap_decoder):
+            x_clap.append(clap_decoder(x_clap_full[idx]))
+        x_clap = torch.stack(x_clap) # align and normalize
+        
+
+        return x_clip, x_clap, global_v, global_a
 
 
 if __name__ == '__main__':

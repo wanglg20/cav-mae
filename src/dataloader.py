@@ -28,6 +28,31 @@ import torchvision.transforms as T
 from PIL import Image
 import PIL
 
+
+def rand_mask_generate(num_patches, mask_ratio, num_frames):
+    mask = np.zeros(num_patches, dtype=np.bool_)
+    num_mask = int(num_patches * mask_ratio)
+    if num_mask > 0:
+        mask_indices = np.random.choice(num_patches, num_mask, replace=False)
+        mask[mask_indices] = True
+    mask = mask.reshape(1, num_patches)
+    mask = mask.repeat(num_frames, axis=0)
+    mask = torch.from_numpy(mask).to(torch.bool)
+    return mask
+
+def mask_expand2d(mask, expand_ratio=2):
+    """
+    Expand the mask in both dimensions by a factor of expand_ratio.
+    :param mask: 2D boolean tensor, shape (H, W)
+    :param expand_ratio: int, factor by which to expand the mask
+    :return: 2D boolean tensor with expanded mask
+    """
+    if expand_ratio <= 1:
+        return mask
+    # Repeat the mask in both dimensions
+    mask_expanded = mask.repeat_interleave(expand_ratio, dim=0).repeat_interleave(expand_ratio, dim=1)
+    return mask_expanded
+
 def make_index_dict(label_csv):
     index_lookup = {}
     with open(label_csv, 'r') as f:
@@ -78,7 +103,9 @@ def preemphasis(signal,coeff=0.97):
     return np.append(signal[0],signal[1:]-coeff*signal[:-1])
 
 class AudiosetDataset(Dataset):
-    def __init__(self, dataset_json_file, audio_conf, label_csv=None, vision='image', align = False, num_frames=10, audio_seg_len = 4, modality='both', raw = 'k700'):
+    def __init__(self, dataset_json_file, audio_conf, label_csv=None, vision='image', align = False, 
+                 num_frames=10, audio_seg_len = 4, modality='both', raw = 'k700', use_mask=False, 
+                 num_v_patches=196, num_a_patches=64):
         """
         Dataset that manages audio recordings
         :param audio_conf: Dictionary containing the audio loading and preprocessing settings
@@ -92,6 +119,9 @@ class AudiosetDataset(Dataset):
         :param num_frames: frames of original video
         :param raw: raw dataset: k700 / audioset 
         """
+        self.use_mask = use_mask
+        
+        
 
         self.raw = raw
         self.datapath = dataset_json_file
