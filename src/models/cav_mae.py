@@ -31,7 +31,11 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
-        x = self.proj(x).flatten(2).transpose(1, 2)
+        """
+        input: 
+            x: B, C, T, num_bins
+        """
+        x = self.proj(x).flatten(2).transpose(1, 2)  # B, T*N, embed_dim
         return x
 
 class Block(nn.Module):

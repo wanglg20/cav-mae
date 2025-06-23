@@ -158,6 +158,10 @@ elif args.model == 'cav-mae-sync':
 else:
     raise ValueError('model not supported')
 
+
+n_parameters = sum(p.numel() for p in audio_model.parameters() if p.requires_grad)
+print('number of params: {} M'.format(n_parameters / 1e6))
+
 if args.use_video:
     vision = "video"
 else:

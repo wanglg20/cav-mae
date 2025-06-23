@@ -53,9 +53,9 @@ def extract_frame(input_video_path: str, target_fold: str, extract_frame_num: in
 
 def _worker(args):
     """the worker function for multiprocessing"""
-    input_path, target_fold = args
+    input_path, target_fold, num_frames = args
     try:
-        extract_frame(input_path, target_fold)
+        extract_frame(input_path, target_fold, num_frames)
     except Exception as e:
         print(f'[ERROR] {input_path}: {e}')
 
@@ -68,18 +68,22 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "-target_fold", type=str,
-        default='/data/wanglinge/project/cav-mae/src/data/k700/train',
+        default='/data/wanglinge/project/cav-mae/src/data/k700/train_16f',
         help="folder to save extracted frames"
     )
     parser.add_argument(
-        "-num_workers", type=int, default=64,
+        "-num_workers", type=int, default=16,
         help="num of threads to use for parallel processing"
+    )
+    parser.add_argument(
+        "-extract_frame_num", type=int, default=16,
+        help="number of frames to extract from each video"
     )
     args = parser.parse_args()
 
     input_filelist = np.loadtxt(args.input_file_list, dtype=str, delimiter=',')
     input_filelist = input_filelist
-    tasks = [(path, args.target_fold) for path in input_filelist]
+    tasks = [(path, args.target_fold, args.extract_frame_num) for path in input_filelist]
     n_workers = args.num_workers or cpu_count()
     results = []
     with ThreadPoolExecutor(max_workers=n_workers) as executor:

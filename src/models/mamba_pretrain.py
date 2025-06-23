@@ -83,7 +83,8 @@ class CrossMamba(nn.Module):
             self,
             # Patch embedding parameters
             img_size=224,
-            audio_length=1024,
+            audio_length=960,               # 960 mod 16*10 = 0, ensure audio length is divisible by 16*10
+            num_bins = 64,
             patch_size=16,
             embed_dim=768,
             kernel_size=1,
@@ -103,9 +104,9 @@ class CrossMamba(nn.Module):
             clip_return_layer=1,
             clip_student_return_interval=1,
             # Model general parameters
-            depth=12,
-            drop_path_rate=0.,
-            num_frames=8,
+            depth=32,
+            drop_path_rate=0.4,
+            num_frames=10,
             device=None,
             dtype=None,
             # Cross-Modality parameters
@@ -113,6 +114,7 @@ class CrossMamba(nn.Module):
             
     ):
         super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
         # Patch embedding
         self.patch_embed_v = PatchEmbedVideo(
             img_size=img_size,
@@ -129,6 +131,8 @@ class CrossMamba(nn.Module):
         )
 
         # Mamba parameters
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+        inter_dpr = [0.0] + dpr
         self.residual_in_fp32 = residual_in_fp32
         self.fused_add_norm = fused_add_norm
         self.bimamba = bimamba
@@ -144,7 +148,7 @@ class CrossMamba(nn.Module):
                     layer_idx=i,
                     bimamba=bimamba,
                     drop_path=inter_dpr[i],
-                    **factory_kwargs,
+                    #**factory_kwargs,
                 )
                 for i in range(depth)
             ]
@@ -152,19 +156,16 @@ class CrossMamba(nn.Module):
 
 
         # General model parameters
-        factory_kwargs = {"device": device, "dtype": dtype}
         self.d_model = self.num_features = self.embed_dim = embed_dim
         self.depth = depth
         self.num_frames = num_frames
         
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
-        inter_dpr = [0.0] + dpr
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
         
         # cls token and position embedding
-        self.patch_embed_a.num_patches = int(audio_length * 128 / 256) #(audio_len / 16) * (audio_channels / 16)
-        self.num_patches_v = int(img_size * img_size / (patch_size * patch_size)) + 1 # H*W / (P*P), 196 = 14*14 by default; +1 represents the cls token 
-        self.num_patches_a = self.patch_embed_a.num_patches + 1
+        self.patch_embed_a.num_patches = int(audio_length * num_bins / 256) #(audio_len / 16) * (audio_channels / 16)
+        self.num_patches_v = int(img_size * img_size / (patch_size * patch_size)) # H*W / (P*P), 196 = 14*14 by default; 
+        self.num_patches_a = self.patch_embed_a.num_patches // num_frames 
         self.cls_token_v = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.cls_token_a = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.use_global_pooling = use_global_pooling
@@ -174,8 +175,8 @@ class CrossMamba(nn.Module):
         else:                                   # use learnable global token
             self.global_token_v = nn.Parameter(torch.zeros(1, 1, embed_dim))
             self.global_token_a = nn.Parameter(torch.zeros(1, 1, embed_dim))
-            self.num_patches_v += 1
-            self.num_patches_a += 1
+            # self.num_patches_v += 1
+            # self.num_patches_a += 1
             trunc_normal_(self.cls_token_a, std=.02)
             trunc_normal_(self.cls_token_v, std=.02)
 
@@ -183,16 +184,15 @@ class CrossMamba(nn.Module):
         self.pos_embed_a = nn.Parameter(torch.zeros(1, self.num_patches_a, embed_dim))
         self.temporal_pos_embed_v = nn.Parameter(torch.zeros(1, num_frames // kernel_size, embed_dim))
         self.temporal_pos_embed_a = nn.Parameter(torch.zeros(1, num_frames // kernel_size, embed_dim))
-        pos_embed_v = get_sinusoid_encoding_table(
-            self.num_patches_v, embed_dim, cls_token=True
-        )
-        pos_embed_a = get_sinusoid_encoding_table(
-            self.num_patches_a, embed_dim, cls_token=True
-        )
-        self.pos_embed_v.data.copy_(torch.from_numpy(pos_embed_v).float())
-        self.pos_embed_a.data.copy_(torch.from_numpy(pos_embed_a).float())
+        pos_embed_v = get_sinusoid_encoding_table(self.num_patches_v, embed_dim)
+        pos_embed_a = get_sinusoid_encoding_table(self.num_patches_a, embed_dim)
+        self.pos_embed_v.data.copy_(pos_embed_v.float())
+        self.pos_embed_a.data.copy_(pos_embed_a.float())
         self.temporal_pos_embed_v.data.copy_(torch.zeros(1, num_frames // kernel_size, embed_dim).float())
         self.temporal_pos_embed_a.data.copy_(torch.zeros(1, num_frames // kernel_size, embed_dim).float())
+
+        # output head:
+        self.norm = (nn.LayerNorm if not rms_norm else RMSNorm)(embed_dim, eps=norm_epsilon, **factory_kwargs)
 
         # CLIP decoder
         self.clip_decoder = nn.ModuleList([
@@ -212,13 +212,16 @@ class CrossMamba(nn.Module):
             ) for _ in range(clip_return_layer)
         ])
         self.clip_pos_embed = get_sinusoid_encoding_table(
-            (self.num_patches_v + 1) * num_frames // kernel_size + 1, 
+            (self.num_patches_v) * num_frames // kernel_size, 
             clip_decoder_embed_dim
         )
         self.clap_pos_embed = get_sinusoid_encoding_table(
-            (self.num_patches_a + num_frames) // kernel_size + 1, 
+            self.num_patches_a * num_frames // kernel_size, 
             clip_decoder_embed_dim
         )
+        self.return_index = []
+        for i in range(clip_return_layer):
+            self.return_index.append(depth - int(i * clip_student_return_interval) - 1)
         
 
         # init
@@ -243,7 +246,7 @@ class CrossMamba(nn.Module):
         Forward pass for the CrossMamba model.
         Args:
             x_v (Tensor): Video input of shape [B, C, T, H, W].
-            x_a (Tensor): Audio input of shape [B, C, T].
+            x_a (Tensor): Audio input of shape [B, num_bins, T].
         Returns:
             dict: A dictionary containing the outputs for video and audio modalities.
         """
@@ -254,22 +257,11 @@ class CrossMamba(nn.Module):
         B, C, T, H, W = x_v.shape
         x_v = x_v.permute(0, 2, 3, 4, 1).reshape(B * T, H * W, C)
 
-        x_a = self.patch_embed_a(x_a)       # B, N, d
+        x_a = x_a.unsqueeze(1)              # B, 1, num_bins, T
+        x_a = x_a.transpose(2, 3)           # B, 1, T, num_bins
+        x_a = self.patch_embed_a(x_a)       # B, N_a, d_a
         B, N_a, d_a = x_a.shape
-        x_a = x_a.reshape(B*T, -1, d_a)  # B*T, N_a // T, d_a
-
-        # Add cls token
-        cls_tokens_v = self.cls_token_v.expand(B*T, -1, -1)
-        cls_tokens_a = self.cls_token_a.expand(B*T, -1, -1)
-        x_v = torch.cat((cls_tokens_v, x_v), dim=1)  # B*T, N+1, d
-        x_a = torch.cat((cls_tokens_a, x_a), dim=1)  # B*T, (N_a // T) +1, d_a
-
-        # Add Global token
-        if not self.use_global_pooling:
-            global_token_v = self.global_token_v.expand(B*T, -1, -1)
-            global_token_a = self.global_token_a.expand(B*T, -1, -1)
-            x_v = torch.cat((x_v, global_token_v), dim=1)   # add global token at tail
-            x_a = torch.cat((x_a, global_token_a), dim=1)
+        x_a = x_a.reshape(B*T, -1, d_a)     # B*T, N_a // T, d_a
     
         # Add position embedding
         pos_embed_v = self.pos_embed_v.expand(B*T, -1, -1)
@@ -285,9 +277,26 @@ class CrossMamba(nn.Module):
         B, T, N_a, D = x_a.shape
         temporal_pos_embed_a = self.temporal_pos_embed_a.unsqueeze(-2).expand(B, -1, N_a, -1)
         x_a = x_a + temporal_pos_embed_a
+        x_v = x_v.reshape(B*T, N_v, D)       # B*T, N_v, d
+        x_a = x_a.reshape(B*T, N_a, d_a)     # B
 
+        # Add cls token
+        cls_tokens_v = self.cls_token_v.expand(B*T, -1, -1)
+        cls_tokens_a = self.cls_token_a.expand(B*T, -1, -1)
+        x_v = torch.cat((cls_tokens_v, x_v), dim=1)  # B*T, N+1, d
+        x_a = torch.cat((cls_tokens_a, x_a), dim=1)  # B*T, (N_a // T) +1, d_a
+
+        # Add Global token
+        if not self.use_global_pooling:
+            global_token_v = self.global_token_v.expand(B*T, -1, -1)
+            global_token_a = self.global_token_a.expand(B*T, -1, -1)
+            x_v = torch.cat((x_v, global_token_v), dim=1)   # add global token at tail
+            x_a = torch.cat((x_a, global_token_a), dim=1)
+
+        x_v, x_a = x_v.reshape(B, T, -1, D), x_a.reshape(B, T, -1, d_a)  # B, T, N+1, d
         # Mask SSM pipeline
         x = torch.cat((x_v, x_a), dim=2)  # B, T, N+N_a, d
+        B, T, N_total, D = x.shape
         x = x.reshape(B, -1, D)  # B, T*(N+N_a), d
         
         x_vis = x[~mask].reshape(B, -1, C) # ~mask means visible
@@ -330,15 +339,30 @@ class CrossMamba(nn.Module):
     
 
     def forward(self, x_v: Tensor, x_a: Tensor, mask=None) -> dict:
-        x_clip_vis = self.forward_features(x_v, x_a, mask)     # Student features
+        """
+        Args:
+            x_v (Tensor): Video input of shape [B, C, T, H, W].
+            x_a (Tensor): Audio input of shape [B, num_bins, T].
+            mask (Tensor, optional): Mask of shape [B, T*(1+N_v+2+N_a+1)], where N_v is the number of video patches and N_a is the number of audio patches.
+                ensuring that the cls token and global token are always visible.
+        Returns:
+            feat_v (Tensor): Video features of shape [B, K, N_v+1, C_d_clip], where K is the number of layers to return. K=1 as default
+            feat_a (Tensor): Audio features of shape [B, K, N_a+1, C_d_clap].
+            glbal_feat_v (Tensor): Global video features of shape [B, T, C_d_clip].
+            glbal_feat_a (Tensor): Global audio features of shape [B, T, C_d_clap].                               
+        """
+        
+        x_vis = self.forward_features(x_v, x_a, mask)     # Student features， B, T*(1+N_v+N_a), d
+
         
         # align CLIP and ClAP
-        K, B, _, C_CLIP = x_clip_vis.shape              # K represent the number of student layers to align with CLIP
-        expand_clip_pos_embed = self.clip_pos_embed.repeat(B, 1, 1).type_as(x).to(x.device).clone().detach()
-        one = torch.ones((B, 1), device=mask.device, dtype=mask.dtype) # cls token is always visible
-        mask = torch.cat((one, mask), dim=1) # [B, N+1, C_d_clip]
+        K, B, _, C_CLIP = x_vis.shape              # K represent the number of student layers to align with CLIP
+        expand_clip_pos_embed = self.clip_pos_embed.repeat(B, 1, 1).type_as(x_v).to(x_v.device).clone().detach()
+        # 
+        # one = torch.ones((B, 1), device=mask.device, dtype=mask.dtype) # cls token is always visible
+        # mask = torch.cat((one, mask), dim=1) # [B, N+1, C_d_clip]
         clip_pos_emd_vis = expand_clip_pos_embed[~mask].view(B, -1, C_CLIP).unsqueeze(0).repeat(K, 1, 1, 1)
-        x_clip_full = x_clip_vis + clip_pos_emd_vis # [K, B, N, C_d_clip]
+        x_clip_full = x_vis + clip_pos_emd_vis # [K, B, N, C_d_clip]
 
         x_clip = []
         for idx, clip_decoder in enumerate(self.clip_decoder):
@@ -346,3 +370,39 @@ class CrossMamba(nn.Module):
         x_clip = torch.stack(x_clip) # align and normalize
 
         return x_clip
+
+
+if __name__ == '__main__':
+    # Test Script, run in the root directory of the project
+    import warnings
+
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    from models.mamba_pretrain import CrossMamba
+
+    model = CrossMamba()
+    print("MambaPretrain model created successfully.")
+    print(model.patch_embed_v.num_patches, model.patch_embed_a.num_patches)
+
+    import torch
+    v = torch.randn(1, 3, 10, 224, 224)  # Video input
+    a = torch.randn(1, 128, 960)
+    ones = torch.ones(1, 10)
+    mask = torch.cat([
+        ones,
+        torch.ones(1, 10 * int(14 * 14 * 0.75)),
+        torch.zeros(1, 10 * int(14 * 14 * 0.25)),
+        ones,
+        ones,     
+        torch.ones(1, 10 * int(6 * 8 * 0.75)),      # # 6 = 960 / 10 / 16(10 = num_frames, 16 = patch_size)
+        torch.zeros(1, 10 * int(6 * 8 * 0.25)),
+        ones, 
+    ], dim=-1).to(torch.bool)
+      # Add ones at the beginning and end
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    v = v.to(device)
+    a = a.to(device)
+    mask = mask.to(device)
+
+
+    

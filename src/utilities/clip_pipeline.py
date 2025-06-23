@@ -28,8 +28,7 @@ clap_inputs = clap_processor(text=text_2, return_tensors="pt", padding=True).to(
 with torch.no_grad():
     clap_features = clap_model.get_text_features(**clap_inputs)
 
-print("CLIP Features Shape:", clip_features.shape)
-print("CLAP Features Shape:", clap_features.shape)
+
 # 归一化特征
 clip_features = clip_features / clip_features.norm(p=2, dim=-1, keepdim=True)
 clap_features = clap_features / clap_features.norm(p=2, dim=-1, keepdim=True)

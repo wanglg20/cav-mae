@@ -35,3 +35,4 @@ src/wandb
 src/vis
 src/.vscode
 src/__pycache__
+src/wandb_offline

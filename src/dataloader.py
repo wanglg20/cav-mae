@@ -418,8 +418,8 @@ if __name__ == '__main__':
     loss = torch.nn.CrossEntropyLoss()
     from traintest_ft import *
     for i, (fbank, image, label_indices) in enumerate(loader):
-        print(fbank.shape)
-        print(image.shape)
+        print(fbank.shape)      # B, 1024, 128
+        print(image.shape)      # B, 10, 3, 224, 224
         print(label_indices.shape)
         # print(torch.sum(label_indices, dim=1))
         # pred = model(fbank, image, mode='audioonly')

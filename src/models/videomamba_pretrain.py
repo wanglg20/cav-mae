@@ -483,6 +483,36 @@ if __name__ == '__main__':
     model = model.to(device)
     mask = mask.to(device)
     img = torch.rand(1, 3, num_frames, img_size, img_size).to(device)
-    print(model(img, mask)[0].shape)
+    print(model(img, mask)[0].shape)        #b, N, 512
+    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print('number of params: {} M'.format(n_parameters / 1e6))
+
+    # default:
+    model = VisionMamba(
+        img_size=224,
+        patch_size=16,
+        depth=32,                       # 默认depth，实际可根据模型定义调整
+        embed_dim=768,                  # 对应clip_decoder_embed_dim
+        channels=3,
+        drop_path_rate=0.4,
+        ssm_cfg=None,
+        norm_epsilon=1e-5,
+        initializer_cfg=None,
+        fused_add_norm=True,
+        rms_norm=True,
+        residual_in_fp32=True,
+        bimamba=True,
+        kernel_size=1,
+        num_frames=8,
+        device=None,
+        dtype=None,
+        use_checkpoint=False,
+        checkpoint_num=0,
+        clip_decoder_embed_dim=576,
+        clip_output_dim=512,
+        clip_norm_type='l2',
+        clip_return_layer=1,
+        clip_student_return_interval=1,
+    )
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params: {} M'.format(n_parameters / 1e6))
