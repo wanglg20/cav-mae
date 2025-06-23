@@ -36,3 +36,7 @@ src/vis
 src/.vscode
 src/__pycache__
 src/wandb_offline
+src/models/__pycache__
+*.pyc
+__pycache__/
+src/utilities/__pycache__
