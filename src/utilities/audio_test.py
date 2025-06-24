@@ -16,8 +16,9 @@ audio = torch.randn(1, 1, 96, 64).to(device)  # 假设的输入音频特征
 
 # out1 = clap_model.get_audio_features(audio, is_longer=torch.tensor([1]).bool().to(device))
 # print(out1.shape)  # 输出音频特征的形状 # 1, 512
-outputs = clap_encoder(audio, is_longer=torch.tensor([1]).bool().to(device))
+outputs = clap_encoder(audio, is_longer=torch.tensor([1]).bool().to(device), output_attentions=torch.tensor([True]).bool().to(device), return_dict=True)
 print(outputs.last_hidden_state.shape)  # 1, 768, 2, 32， 
+print(outputs.attentions[-1].shape)     # 1, 32, 64, 64
 
 
 

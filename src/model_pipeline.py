@@ -7,7 +7,9 @@ from models.mamba_pretrain import CrossMamba
 from models.videomamba_pretrain import VisionMamba
 from models.teacher import clip_b16
 from dataloader import rand_mask_generate, mask_expand2d
-
+from transformers.models.clap.modeling_clap import ClapAudioModelOutput, ClapAudioPatchEmbed, ClapAudioStage, ClapAudioPatchMerging
+from transformers.models.clap.modeling_clap import ClapAudioModel
+from transformers import CLIPModel, CLIPProcessor, ClapModel, ClapProcessor
 
 def test_cross_mamba():
     model = CrossMamba(
@@ -59,7 +61,7 @@ def test_cross_mamba():
     target_clip = teacher_clip[~mask_v].reshape(B, -1, 768)
     target_clap = teacher_clap[~mask_a].reshape(B, -1, 768)
     print("Target CLIP shape:", target_clip.shape)     # 1, 196*16, 768
-    print("Target CLAP shape:", target_clap.shape)     # 1,
+    print("Target CLAP shape:", target_clap.shape)     # 1, 16, 768
 
 def test_clip_teacher():
     teacher_model = clip_b16(
@@ -75,15 +77,31 @@ def test_clip_teacher():
         torch.ones(1, 10 * int(14 * 14 * 0.75)),
         torch.zeros(1, 10 * int(14 * 14 * 0.25)),
     ], dim=-1).bool()
-    x = torch.randn(1, 3, 10, 224, 224)  
-    out = teacher_model(x, mask)
-    print(out[0].shape)        
+    mask = mask.repeat(2, 1)
+    x = torch.randn(2, 3, 10, 224, 224)  
+    out = teacher_model(x)
+    print(out[0].shape)  # K, B, 1961, 768
+    print(out[1].shape)  # Attention weights shape  B*T, 49
 
 
+def test_clap_teacher():
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    clap_model = ClapModel.from_pretrained("laion/clap-htsat-fused").to(device)
+
+    clap_encoder = clap_model.audio_model
+    weight_path = '/data/wanglinge/project/cav-mae/src/weight/teacher/clap.pth'
+    clap_encoder.load_state_dict(torch.load(weight_path, map_location=device), strict=True)
+    teacher_model = clap_encoder
+    audio = torch.randn(1, 1, 1024, 64).to(device)  # 假设的输入音频特征
+    teacher_model = teacher_model.to(device)
+    out = teacher_model(audio, is_longer=torch.tensor([1]).bool().to(device), output_attentions=torch.tensor([True]).bool().to(device), return_dict=True)
+    clap_feat = out.last_hidden_state  # 1, 768, 2, 32
+    clap_attn = out.attentions[-1]  # 1, 32, 64, 64
+    print(clap_feat.shape)  # 1, 768, 2, 32
 # def test_clap_teacher():
     
 
 if __name__ == "__main__":
-    #key_mapping(torch.load('weight/teacher/clip_vit_b16.pth', map_location='cpu'))
-    # test_clip_teacher()
-    test_cross_mamba()
+    test_clip_teacher()
+    # test_cross_mamba()
+    # test_clap_teacher()

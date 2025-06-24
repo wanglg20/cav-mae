@@ -63,12 +63,12 @@ if __name__ == "__main__":
     parser = ArgumentParser(description="Extract frames from videos")
     parser.add_argument(
         "-input_file_list", type=str,
-        default='/data/wanglinge/project/cav-mae/src/data/info/k700_train.csv',
+        default='/data/wanglinge/project/cav-mae/src/data/info/k700_test.csv',
         help="input file list"
     )
     parser.add_argument(
         "-target_fold", type=str,
-        default='/data/wanglinge/project/cav-mae/src/data/k700/train_16f',
+        default='/data/wanglinge/dataset/k700/frames_16',
         help="folder to save extracted frames"
     )
     parser.add_argument(

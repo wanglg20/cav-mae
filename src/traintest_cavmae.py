@@ -38,10 +38,7 @@ def resume_training(audio_model, optimizer, exp_dir, device):
     """
     checkpoint_path = os.path.join(exp_dir, "models", "best_audio_model.pth")
     optimizer_path = os.path.join(exp_dir, "models", "best_optim_state.pth")
-
-    if os.path.exists(checkpoint_path) and os.path.exists(optimizer_path):
-        
-        
+    if os.path.exists(checkpoint_path) and os.path.exists(optimizer_path):    
         # Load optimizer state
         optimizer_state = torch.load(optimizer_path, map_location=device)
         optimizer.load_state_dict(optimizer_state)
@@ -63,7 +60,6 @@ def resume_training(audio_model, optimizer, exp_dir, device):
 
 
 def train(audio_model, train_loader, test_loader, args, local_rank):
-    
     device = torch.device(f'cuda:{local_rank}')
     audio_model.to(device)
     audio_model = DDP(audio_model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)

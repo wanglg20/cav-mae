@@ -43,7 +43,7 @@ def rand_mask_generate(num_frames, num_patches, mask_ratio):
 def mask_expand2d(mask, expand_ratio=2):
     """
     Expand the mask in both dimensions by a factor of expand_ratio.
-    :param mask: 2D boolean tensor, shape (T, H, W)
+    :param mask: 3D boolean tensor, shape (Frame, Freq, Time_stamp)
     :param expand_ratio: int, factor by which to expand the mask
     :return: 2D boolean tensor with expanded mask
     """
@@ -356,9 +356,7 @@ class AudiosetDataset(Dataset):
                     print('there is an error in loading image')
             else:
                 image = torch.zeros([3, self.im_res, self.im_res]) + 0.01
-
-        
-            
+    
 
         else:
             #print("args:", self.modality)
@@ -430,12 +428,12 @@ class AudiosetDataset(Dataset):
         if self.use_mask:
             zeros = torch.zeros(self.num_frames, 1).bool()
             mask_v = rand_mask_generate(self.num_frames, self.num_v_patches, self.mask_ratio)
-            mask_a = rand_mask_generate(self.num_frames, 64 // self.num_frames, self.mask_ratio)
-            mask_a = mask_a.reshape(self.num_frames, 2, 2)
+            mask_a_ori = rand_mask_generate(self.num_frames, 64 // self.num_frames, self.mask_ratio)
+            mask_a = mask_a_ori.reshape(self.num_frames, 2, 2)
             mask_a = mask_expand2d(mask_a, expand_ratio=2)  # Frame, Freq, Time, 
             mask_a = mask_a.reshape(self.num_frames, -1)
             mask = torch.cat([zeros, mask_v, zeros, zeros, mask_a, zeros], dim=1)
-            return fbank, image, label_indices, mask, mask_v, mask_a
+            return fbank, image, label_indices, mask, mask_v, mask_a_ori
         return fbank, image, label_indices
 
     def __len__(self):
@@ -445,31 +443,20 @@ if __name__ == '__main__':
     # test the dataloader
     audio_conf = {'num_mel_bins': 128, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
               'noise':True, 'label_smooth': 0, 'im_res': 224}
-    #dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700_val.json', audio_conf, label_csv='data/info/k700_class.csv', vision='video', align=True, modality='audioonly')
+    # dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700_val.json', audio_conf, label_csv='data/info/k700_class.csv', vision='video', align=True, modality='audioonly')
     # dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/as/data/unbalanced_train_segments_valid.json', audio_conf, 
-    #                           label_csv='/data/wanglinge/project/cav-mae/src/data/info/as/data/as_label.csv',  modality='audioonly', raw='as200k')
-    dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700_val_2.json', audio_conf, 
-                               label_csv='/data/wanglinge/project/cav-mae/src/data/info/k700_class.csv',  modality='both', raw='k700', vision='video')
+    #     label_csv='/data/wanglinge/project/cav-mae/src/data/info/as/data/as_label.csv',  modality='audioonly', raw='as200k')
+    dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700/k700_val.json', audio_conf, num_frames=16,
+                               label_csv='/data/wanglinge/project/cav-mae/src/data/info/k700/k700_class.csv',  modality='both', raw='k700', vision='video', use_mask=True)
     print('dataset length is {:d}'.format(len(dataset)))
     loader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=False, num_workers=0)
-    from models.cav_mae import CAVMAE_k700_FT, CAVMAE_Sync_k700_FT, CAVMAEFT
-    model = CAVMAE_Sync_k700_FT(label_dim = 527, pooling=True, audio_length=400)
-    #model = CAVMAEFT(label_dim=527, audio_length=1024)
-    # model = CAVMAE_Sync_k700_FT(label_dim=527, audio_length=1024)
     loss = torch.nn.CrossEntropyLoss()
     from traintest_ft import *
-    for i, (fbank, image, label_indices) in enumerate(loader):
+    for i, (fbank, image, label_indices, mask, mask_v, mask_a) in enumerate(loader):
         print(fbank.shape)      # B, 1024, 128
         print(image.shape)      # B, 10, 3, 224, 224
         print(label_indices.shape)
-        # print(torch.sum(label_indices, dim=1))
-        # pred = model(fbank, image, mode='audioonly')
-        # pred_loss = loss(pred, label_indices)
-        # print(pred.shape)
-        # print(pred_loss)
-        #pred = model(fbank, image)
-        # print(pred.shape)
-        # print(image.shape)
-        # print(label_indices.shape)
-        # pred = model(fbank, image)
+        print(mask.shape)
+        print(mask_v.shape)
+        print(mask_a.shape)    # B, 16, 4
         break

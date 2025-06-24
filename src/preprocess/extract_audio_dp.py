@@ -6,6 +6,7 @@ from tqdm import tqdm
 
 def extract_audio(task):
     input_f, target_fold = task
+    input_f = input_f[0]
     ext = input_f.split('.')[-1]
     video_id = os.path.basename(input_f)[:-len(ext) - 1]
 
@@ -31,8 +32,8 @@ def extract_audio(task):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Multi-threaded audio extractor')
-    parser.add_argument("-input_file_list", type=str, default='/data/wanglinge/project/cav-mae/src/data/info/k700_train.csv', help="CSV file: one video path per line")
-    parser.add_argument("-target_fold", type=str, default='/data/wanglinge/project/cav-mae/src/data/k700/train/audio', help="Folder to store output audio")
+    parser.add_argument("-input_file_list", type=str, default='/data/wanglinge/project/cav-mae/src/data/info/k700/k700_val.csv', help="CSV file: one video path per line")
+    parser.add_argument("-target_fold", type=str, default='/data/wanglinge/dataset/k700/audio', help="Folder to store output audio")
     parser.add_argument("-num_workers", type=int, default=16, help="Number of threads to use")
     args = parser.parse_args()
 

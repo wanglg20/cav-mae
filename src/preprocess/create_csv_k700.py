@@ -1,9 +1,10 @@
 import os 
+import csv
 
-data_info = '/data/wanglinge/dataset/OpenMMLab___Kinetics_700/raw/Kinetics_700/kinetics700_train_valid_videos.txt'
+data_info = '/data/wanglinge/dataset/OpenMMLab___Kinetics_700/raw/Kinetics_700/kinetics700_train_list_videos.txt'
 video_list = []
 root = '/data/wanglinge/dataset/OpenMMLab___Kinetics_700/raw/Kinetics_700/videos'
-output_file = 'data/k700_train.csv'
+output_file = '/data/wanglinge/project/cav-mae/src/data/info/k700/k700_train.csv'
 label_list = []
 
 with open(data_info, 'r') as f:
@@ -14,8 +15,15 @@ with open(data_info, 'r') as f:
         video_list.append(video_path)
         label_list.append(label)
 
-with open(output_file, 'w') as f:
+# 使用csv模块写入两列数据
+with open(output_file, 'w', newline='', encoding='utf-8') as f:
+    writer = csv.writer(f)
+    
+    # # 写入列标题
+    # writer.writerow(['path', 'label'])
+    
+    # 写入数据行
     for i, video in enumerate(video_list):
         video_path = os.path.join(root, video)
         label = label_list[i]
-        f.write(f"{video_path}\n")
+        writer.writerow([video_path, label])
