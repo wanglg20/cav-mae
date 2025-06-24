@@ -359,8 +359,8 @@ class CrossMamba(nn.Module):
         mask = mask.reshape(B, T, -1)
         mask_v = mask[:, :, 1:self.num_patches_v + 1]   # B, T, N_v (1, 10, 196)
         mask_a = mask[:, :, self.num_patches_v + 3:-1]  # B, T, N_a
-        global_v = mask[:, :, self.num_patches_v + 1]  # B, T, 1
-        global_a = mask[:, :, -1]  # B, T, 1
+
+
 
         num_mask_v = int(mask_v.sum(dim=-1)[0, 0])
         num_mask_a = int(mask_a.sum(dim=-1)[0, 0])
@@ -370,6 +370,8 @@ class CrossMamba(nn.Module):
         x_vis = x_vis.reshape(K*B, T, -1, self.embed_dim)  # B, T, N+1, d
         v_vis = x_vis[:, :, 1:num_visible_v_per_frame+1]   # B, T, 49, 768
         a_vis = x_vis[:, :, num_visible_v_per_frame+3:-1]
+        global_v = x_vis[:, :, num_visible_v_per_frame+1]  # B, T, 1
+        global_a = x_vis[:, :, -1]  # B, T, 1
 
         _, T, N_vv, C_CLIP = v_vis.shape
         _, T, N_va, C_CLAP = a_vis.shape
@@ -433,6 +435,3 @@ if __name__ == '__main__':
     v = v.to(device)
     a = a.to(device)
     mask = mask.to(device)
-
-
-    

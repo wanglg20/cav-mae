@@ -29,28 +29,28 @@ from PIL import Image
 import PIL
 
 
-def rand_mask_generate(num_patches, mask_ratio, num_frames):
-    mask = np.zeros(num_patches, dtype=np.bool_)
-    num_mask = int(num_patches * mask_ratio)
-    if num_mask > 0:
-        mask_indices = np.random.choice(num_patches, num_mask, replace=False)
-        mask[mask_indices] = True
-    mask = mask.reshape(1, num_patches)
-    mask = mask.repeat(num_frames, axis=0)
-    mask = torch.from_numpy(mask).to(torch.bool)
+def rand_mask_generate(num_frames, num_patches, mask_ratio):
+    num_mask_per_frame = int(num_patches * mask_ratio)
+
+    rand_vals = torch.rand((num_frames, num_patches), device='cpu')
+    _, indices = torch.topk(rand_vals, k=num_mask_per_frame, dim=1, largest=False)
+    mask = torch.zeros((num_frames, num_patches), dtype=torch.bool, device='cpu')
+    mask.scatter_(1, indices, True)
+    # mask = mask.flatten()
     return mask
+
 
 def mask_expand2d(mask, expand_ratio=2):
     """
     Expand the mask in both dimensions by a factor of expand_ratio.
-    :param mask: 2D boolean tensor, shape (H, W)
+    :param mask: 2D boolean tensor, shape (T, H, W)
     :param expand_ratio: int, factor by which to expand the mask
     :return: 2D boolean tensor with expanded mask
     """
     if expand_ratio <= 1:
         return mask
     # Repeat the mask in both dimensions
-    mask_expanded = mask.repeat_interleave(expand_ratio, dim=0).repeat_interleave(expand_ratio, dim=1)
+    mask_expanded = mask.repeat_interleave(expand_ratio, dim=1).repeat_interleave(expand_ratio, dim=2)
     return mask_expanded
 
 def make_index_dict(label_csv):
@@ -105,7 +105,7 @@ def preemphasis(signal,coeff=0.97):
 class AudiosetDataset(Dataset):
     def __init__(self, dataset_json_file, audio_conf, label_csv=None, vision='image', align = False, 
                  num_frames=10, audio_seg_len = 4, modality='both', raw = 'k700', use_mask=False, 
-                 num_v_patches=196, num_a_patches=64):
+                 num_v_patches=196, num_a_patches=64, mask_ratio=0.75):
         """
         Dataset that manages audio recordings
         :param audio_conf: Dictionary containing the audio loading and preprocessing settings
@@ -120,8 +120,9 @@ class AudiosetDataset(Dataset):
         :param raw: raw dataset: k700 / audioset 
         """
         self.use_mask = use_mask
-        
-        
+        self.num_v_patches = num_v_patches
+        self.num_a_patches = num_a_patches
+        self.mask_ratio = mask_ratio
 
         self.raw = raw
         self.datapath = dataset_json_file
@@ -425,6 +426,16 @@ class AudiosetDataset(Dataset):
             frame_idx = int(frame_dir[-1])
             fbank = self.align_img_spec(fbank, frame_idx)
         # fbank shape is [time_frame_num, frequency_bins], e.g., [1024, 128]
+
+        if self.use_mask:
+            zeros = torch.zeros(self.num_frames, 1).bool()
+            mask_v = rand_mask_generate(self.num_frames, self.num_v_patches, self.mask_ratio)
+            mask_a = rand_mask_generate(self.num_frames, 64 // self.num_frames, self.mask_ratio)
+            mask_a = mask_a.reshape(self.num_frames, 2, 2)
+            mask_a = mask_expand2d(mask_a, expand_ratio=2)  # Frame, Freq, Time, 
+            mask_a = mask_a.reshape(self.num_frames, -1)
+            mask = torch.cat([zeros, mask_v, zeros, zeros, mask_a, zeros], dim=1)
+            return fbank, image, label_indices, mask, mask_v, mask_a
         return fbank, image, label_indices
 
     def __len__(self):
