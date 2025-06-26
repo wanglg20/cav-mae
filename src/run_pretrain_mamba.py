@@ -88,15 +88,9 @@ parser.add_argument('--save_model', help='save the model or not', type=ast.liter
 parser.add_argument("--mixup", type=float, default=0, help="how many (0-1) samples need to be mixup during training")
 parser.add_argument("--bal", type=str, default=None, help="use balanced sampling or not")
 
-parser.add_argument("--cont_model", help='previous pretrained model', type=str, default=None)
-parser.add_argument("--weight_file", type=str, default='/data/wanglinge/project/cav-mae/src/weight/init/ori_mae_11.pth', help="path to weight file")
-parser.add_argument('--norm_pix_loss', help='if use norm_pix_loss', type=ast.literal_eval, default=True)
-parser.add_argument("--pretrain_path", type=str, default='None', help="pretrained model path")
-parser.add_argument("--contrast_loss_weight", type=float, default=0.01, help="weight for contrastive loss")
-parser.add_argument("--mae_loss_weight", type=float, default=3.0, help="weight for mae loss")
-parser.add_argument('--tr_pos', help='if use trainable positional embedding', type=ast.literal_eval, default=False)
+
+parser.add_argument("--ts_loss_weight", type=float, default=3.0, help="weight for teacher-student loss")
 parser.add_argument("--masking_ratio", type=float, default=0.75, help="masking ratio")
-parser.add_argument("--mask_mode", type=str, default='unstructured', help="masking ratio", choices=['unstructured', 'time', 'freq', 'tf'])
 parser.add_argument("--visible_gpus", type=str, default='0,1,2,3,4,5')
 parser.add_argument("--wandb_project_name", type=str, default='cav')
 parser.add_argument("--wandb_run_name", type=str, default='pretrain_mamba')
@@ -106,8 +100,11 @@ parser.add_argument("--wandb_id", type=str, default=None,
                         help="wandb id if resuming from a previous run")                        
 parser.add_argument("--resume", action="store_true",
                         help="resume from a previous run")
-parser.add_argument("--contrastive_loss_weight", type=float, default=0.5, help="weight for contrastive loss")
+parser.add_argument("--contrastive_loss_weight", type=float, default=0.01, help="weight for contrastive loss")
 parser.add_argument("--mask_ratio", type=float, default=0.75, help="masking ratio for contrastive loss")
+parser.add_argument("--train_frame_root", type=str, default='/data/wanglinge/project/cav-mae/src/data/k700/train_16f', help="the root directory for training video frames")
+parser.add_argument("--val_frame_root", type=str, default='/data/wanglinge/project/cav-mae/src/data/k700/val_16f', help="the root directory for validation video frames")
+parser.add_argument("--clap_path", type=str, default='/data/wanglinge/project/cav-mae/src/weight/teacher/clap.pth', help="the path to the pre-trained clap model")
 
 args = parser.parse_args()
 im_res = 224
@@ -115,11 +112,13 @@ im_res = 224
 local_rank = setup_distributed(args.visible_gpus)
 audio_conf = {'num_mel_bins': 64, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': args.mixup, 'dataset': args.dataset, 'mode':'train', 'mean':args.dataset_mean, 'std':args.dataset_std,
               'noise':args.noise, 'label_smooth': 0, 'im_res': im_res}
-val_audio_conf = {'num_mel_bins': 128, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': 0, 'dataset': args.dataset,
+val_audio_conf = {'num_mel_bins': 64, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': 0, 'dataset': args.dataset,
                   'mode':'eval', 'mean': args.dataset_mean, 'std': args.dataset_std, 'noise': False, 'im_res': im_res}
 
-print('current mae loss {:.3f}, and contrastive loss {:.3f}'.format(args.mae_loss_weight, args.contrast_loss_weight))
 
+print("loss weight for teacher-student loss: ", args.ts_loss_weight)
+print("masking ratio: ", args.masking_ratio)
+print("contrastive loss weight: ", args.contrastive_loss_weight)
 
 print(args)
 if args.use_wandb and local_rank == 0:
@@ -163,7 +162,7 @@ teacher_v = clip_b16(
     )
 clap_model = ClapModel.from_pretrained("laion/clap-htsat-fused")
 clap_encoder = clap_model.audio_model
-weight_path = '/data/wanglinge/project/cav-mae/src/weight/teacher/clap.pth'
+weight_path = args.clap_path
 clap_encoder.load_state_dict(torch.load(weight_path, map_location='cpu'), strict=True)
 teacher_a = clap_encoder
 
@@ -174,13 +173,13 @@ print('number of params: {} M'.format(n_parameters / 1e6))
 # Dataset and Dataloader
 train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, 
     audio_conf=audio_conf, modality='both', vision='video', raw='k700', num_frames=16,
-    use_mask=True, video_frame_dir='/data/wanglinge/project/cav-mae/src/data/k700/train_16f')
+    use_mask=True, video_frame_dir=args.train_frame_root)
 sampler = DistributedSampler(train_set)
 train_loader = torch.utils.data.DataLoader(
 train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, num_frames=16,
     audio_conf=val_audio_conf, modality='both', vision='video', raw='k700', 
-    use_mask=True, video_frame_dir='/data/wanglinge/project/cav-mae/src/data/k700/val_16f')
+    use_mask=True, video_frame_dir=args.val_frame_root)
 val_sampler = DistributedSampler(val_set)
 val_loader = torch.utils.data.DataLoader(
     val_set, batch_size=10, sampler = val_sampler, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)

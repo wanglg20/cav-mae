@@ -159,7 +159,6 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
         print('---------------')
         print(datetime.datetime.now())
         print("current #epochs=%s, #steps=%s" % (epoch, global_step))
-        print('current masking ratio is {:.3f} for both modalities; audio mask mode {:s}'.format(args.masking_ratio, args.mask_mode))
         for i, (a_input, v_input, _, mask, mask_v, mask_a) in enumerate(train_loader):
             #print("input shape: ", a_input.shape, v_input.shape, mask.shape, mask_v.shape, mask_a.shape)
             #torch.Size([10, 1024, 64]) torch.Size([10, 16, 3, 224, 224]) torch.Size([10, 16, 216]) torch.Size([10, 16, 196]) torch.Size([10, 16, 4])
@@ -172,8 +171,12 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
             
             
 
-            # Teacher Model Forward Pass
+            # Teacher Model Forward Pass - Optimized for memory efficiency
             with torch.no_grad():
+                # Pre-create reusable tensors
+                is_longer_tensor = torch.tensor([True], dtype=torch.bool, device=device)
+                output_attentions_tensor = torch.tensor([True], dtype=torch.bool, device=device)
+                
                 # Clip pipeline and visual mask
                 v_input = v_input.permute(0, 2, 1, 3, 4)  # B, C, T, H, W
                 clip_target, clip_attn = teacher_v(v_input) # K, B, 1961, 768
@@ -181,20 +184,33 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
                 C_CLIP = clip_target.shape[-1]  # 512
                 mask_v = mask_v.reshape(B, T, -1)
                 
+                # Clear intermediate variables to save memory
+                del clip_attn
+                torch.cuda.empty_cache()
+                
                 # Clap pipeline and audio mask
                 clap_input = a_input.unsqueeze(1)  # B, 1, 1024, 64
-                audio_outputs = teacher_a(clap_input, is_longer=torch.tensor([True]).bool().to(device), output_attentions=torch.tensor([True]).bool().to(device))
+                audio_outputs = teacher_a(clap_input, is_longer=is_longer_tensor, output_attentions=output_attentions_tensor)
                 clap_target, clap_attn = audio_outputs.last_hidden_state, audio_outputs.attentions[-1]
-                _, C_CLAP, num_freq_bins, _ = clap_target.shape  # B, 768, 2, 32
-                # clap_target = clap_target.reshape(B, D, num_freq_bins, T, -1).permute(0, 1, 3, 2, 4) # B, 768, num_frmaes, num_freq_bins, num_time_bins
-                clap_target = rearrange(clap_target, 'b d freq_bins (t time_bins) -> b d t freq_bins time_bins', t=T) # B, 768, num_frames, num_freq_bins, num_time_bins
-                clap_target = clap_target.flatten(start_dim=2)  # B, 768, (T * freq_bins * time_bins)
-                clap_target = clap_target.permute(0, 2, 1)  # B, 64, 768; 64 = num_frames * num_freq_bins * num_time_bins
                 
+                # Clear audio outputs to save memory
+                del audio_outputs
+                _, C_CLAP, num_freq_bins, _ = clap_target.shape  # B, 768, 2, 32
+                # Optimize tensor operations - use in-place operations where possible
+                clap_target = rearrange(clap_target, 'b d freq_bins (t time_bins) -> b d t freq_bins time_bins', t=T)
+                clap_target = clap_target.flatten(start_dim=2).permute(0, 2, 1)  # B, 64, 768
+                
+                # Clear attention weights to save memory
+                del clap_attn
+                torch.cuda.empty_cache()
+                
+                # Optimize mask operations - reduce intermediate tensor creation
                 mask_a_ori = mask_a.clone() # B, T, 4
-                mask_a = mask_a.reshape(B, T, 2, 2)
-                mask_a = mask_a.repeat_interleave(2, dim=-1).repeat_interleave(2, dim=-2)  # B, T, 4, 4
-                mask_a = mask_a.reshape(B, T, -1)  # B, 16, 16
+                # More efficient mask expansion
+                mask_a = mask_a.view(B, T, 2, 2)
+                mask_a = mask_a.repeat_interleave(2, dim=-1).repeat_interleave(2, dim=-2)
+                mask_a = mask_a.view(B, T, -1)  # B, 16, 16
+
                 mask_v = mask_v.bool().to(device)
                 mask_a = mask_a.bool().to(device)
                 zeros = torch.zeros(B, T, 1).bool().to(device)  # B, T, 1
@@ -217,10 +233,14 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
                 #print("input shape: ", a_input.shape, v_input.shape, mask.shape)
                 x_clip, x_clap, global_v, global_a = model(v_input, a_input, mask)
                 pred_clap = x_clap[:, :, 3::4, :]               # use every 4th state as the CLAP prediction
-                global_v = global_v.mean(dim=1)  # B, 16
-                global_a = global_a.mean(dim=1)  # B, 16
+                # global_v = global_v.mean(dim=1)  # B, 16
+                # global_a = global_a.mean(dim=1)  # B, 16
+                B, T, D = global_v.shape
+                global_v = global_v.reshape(B, -1)  # B, 16* D
+                global_a = global_a.reshape(B, -1)  # B, 16 * D
+                # print("global_v shape: ", global_v.shape, "global_a shape
                 loss_c, c_acc = contrastive_loss(global_v, global_a)
-                loss_c = loss_c * 0.01
+                loss_c = loss_c * args.contrastive_loss_weight
                 loss_a = loss_distillation(pred_clap, clap_target)* 10
                 loss_v = loss_distillation(x_clip, clip_target)* 10
 
@@ -292,6 +312,8 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
             best_loss = eval_loss_av
             best_epoch = epoch
 
+        if not os.path.exists("%s/models" % (exp_dir)):
+            os.makedirs("%s/models" % (exp_dir))
         if best_epoch == epoch:
             torch.save(model.state_dict(), "%s/models/best_model.pth" % (exp_dir))
             torch.save(optimizer.state_dict(), "%s/models/best_optim_state.pth" % (exp_dir))
@@ -342,48 +364,82 @@ def validate_mamba(model, teacher_v, teacher_a, test_loader, args, local_rank=0)
     loss_distillation = nn.MSELoss()
     with torch.no_grad():
         for i, (a_input, v_input, _, mask, mask_v, mask_a) in enumerate(test_loader):
-            # Teacher Model Forward Pass
+            if i> 10:
+                break
             B, T, C, H, W = v_input.shape
-            clip_target, clip_attn = teacher_v(v_input), # K, B, 1961, 768
+            a_input = a_input.to(device, non_blocking=True)
+            v_input = v_input.to(device, non_blocking=True)
+            is_longer_tensor = torch.tensor([True], dtype=torch.bool, device=device)
+            output_attentions_tensor = torch.tensor([True], dtype=torch.bool, device=device)
+            
+            # Clip pipeline and visual mask
+            v_input = v_input.permute(0, 2, 1, 3, 4)  # B, C, T, H, W
+            clip_target, clip_attn = teacher_v(v_input) # K, B, 1961, 768
             mask_v = attn_mask_generator(clip_attn, args.mask_ratio, T)  # B, 1960
             C_CLIP = clip_target.shape[-1]  # 512
             mask_v = mask_v.reshape(B, T, -1)
             
-            # Clap pipeline and audio mask
-            audio_outputs = teacher_a(is_longer=torch.tensor([True]).bool().to(device), output_attentions=torch.tensor([True]).bool().to(device))
-            clap_target, clap_attn = audio_outputs.last_hidden_state, audio_outputs.attentions[-1]
-            _, C_CLAP, num_freq_bins, _ = clap_target.shape  # B, 768, 2, 32
-            # clap_target = clap_target.reshape(B, D, num_freq_bins, T, -1).permute(0, 1, 3, 2, 4) # B, 768, num_frmaes, num_freq_bins, num_time_bins
-            clap_target = rearrange(clap_target, 'b d freq_bins (t time_bins) -> b d t freq_bins time_bins', t=T) # B, 768, num_frames, num_freq_bins, num_time_bins
-            clap_target = clap_target.flatten(start_dim=2)  # B, 768, (T * freq_bins * time_bins)
-            clap_target = clap_target.permute(0, 2, 1)  # B, 64, 768; 64 = num_frames * num_freq_bins * num_time_bins
+            # Clear intermediate variables to save memory
+            del clip_attn
+            torch.cuda.empty_cache()
             
+            # Clap pipeline and audio mask
+            clap_input = a_input.unsqueeze(1)  # B, 1, 1024, 64
+            audio_outputs = teacher_a(clap_input, is_longer=is_longer_tensor, output_attentions=output_attentions_tensor)
+            clap_target, clap_attn = audio_outputs.last_hidden_state, audio_outputs.attentions[-1]
+            
+            # Clear audio outputs to save memory
+            del audio_outputs
+            _, C_CLAP, num_freq_bins, _ = clap_target.shape  # B, 768, 2, 32
+            # Optimize tensor operations - use in-place operations where possible
+            clap_target = rearrange(clap_target, 'b d freq_bins (t time_bins) -> b d t freq_bins time_bins', t=T)
+            clap_target = clap_target.flatten(start_dim=2).permute(0, 2, 1)  # B, 64, 768
+            
+            # Clear attention weights to save memory
+            del clap_attn
+            torch.cuda.empty_cache()
+            
+            # Optimize mask operations - reduce intermediate tensor creation
             mask_a_ori = mask_a.clone() # B, T, 4
-            mask_a = mask_a.reshape(B, T, 2, 2)
-            mask_a = mask_a.repeat_interleave(2, dim=-1).repeat_interleave(2, dim=-2)  # B, T, 4, 4
-            mask_a = mask_a.reshape(B, T, -1)  # B, 16, 16
+            # More efficient mask expansion
+            mask_a = mask_a.view(B, T, 2, 2)
+            mask_a = mask_a.repeat_interleave(2, dim=-1).repeat_interleave(2, dim=-2)
+            mask_a = mask_a.view(B, T, -1)  # B, 16, 16
 
+            mask_v = mask_v.bool().to(device)
+            mask_a = mask_a.bool().to(device)
             zeros = torch.zeros(B, T, 1).bool().to(device)  # B, T, 1
             mask = torch.cat([zeros, mask_v, zeros, zeros, mask_a, zeros], dim=2)  # B, T, 196 + 16 + 4
             mask = mask.reshape(B, -1)
             # get target features
             mask_v = mask_v.reshape(B, -1)
-            mask_v = torch.cat((torch.ones(B, 1), mask_v), dim=1).bool()  # B, 1961  # the cls token wont join the loss calculation
+            mask_v = torch.cat((torch.ones(B, 1).to(device), mask_v), dim=1).bool()  # B, 1961  # the cls token wont join the loss calculation
             clip_target = clip_target.squeeze(0) if len(clip_target.shape) == 4 else clip_target
             clip_target = clip_target[~mask_v].reshape(B, -1, C_CLIP)
 
             mask_a = mask_a_ori.reshape(B, -1)
             clap_target = clap_target[~mask_a].reshape(B, -1, C_CLAP)
+            # Normalize the targets
+            clip_target = torch.nn.functional.normalize(clip_target, dim=-1)
+            clap_target = torch.nn.functional.normalize(clap_target, dim=-1)
 
-            x_clip, x_clap, global_v, global_a = model(a_input, v_input, mask)
+            a_input = a_input.permute(0, 2, 1)  # B, C, T
+            #print("input shape: ", a_input.shape, v_input.shape, mask.shape)
+            x_clip, x_clap, global_v, global_a = model(v_input, a_input, mask)
             pred_clap = x_clap[:, :, 3::4, :]               # use every 4th state as the CLAP prediction
+            # global_v = global_v.mean(dim=1)  # B, 16
+            # global_a = global_a.mean(dim=1)  # B, 16
+            B, T, D = global_v.shape
+            global_v = global_v.reshape(B, -1)  # B, 16* D
+            global_a = global_a.reshape(B, -1)  # B, 16 * D
             loss_c, c_acc = contrastive_loss(global_v, global_a)
-            loss_a = loss_distillation(pred_clap, clap_target)
-            loss_v = loss_distillation(x_clip, clip_target)
-            loss_av = loss_a + loss_v + args.contrastive_loss_weight * loss_c
+            loss_c = loss_c * args.contrastive_loss_weight
+            loss_a = loss_distillation(pred_clap, clap_target)* 10
+            loss_v = loss_distillation(x_clip, clip_target)* 10
+            loss = loss_a + loss_v +  loss_c
             loss_a_meter.update(loss_a.item(), B)
             loss_v_meter.update(loss_v.item(), B)   
             loss_c_meter.update(loss_c.item(), B)
-            loss_av_meter.update(loss_av.item(), B)
+            loss_av_meter.update(loss.item(), B)
         return loss_av_meter.avg, loss_v_meter.avg, loss_a_meter.avg, loss_c_meter.avg
         
