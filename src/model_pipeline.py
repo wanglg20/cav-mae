@@ -73,12 +73,14 @@ def test_clip_teacher():
       clip_return_interval=1,
       clip_return_cls=True
     )
+    # weight = '/data/wanglinge/project/cav-mae/src/weight/teacher/vit_b16.pth'
+    # teacher_model.load_state_dict(torch.load(weight, map_location='cpu'), strict=True)
     mask = torch.cat([
         torch.ones(1, 10 * int(14 * 14 * 0.75)),
         torch.zeros(1, 10 * int(14 * 14 * 0.25)),
     ], dim=-1).bool()
     mask = mask.repeat(2, 1)
-    x = torch.randn(2, 3, 10, 224, 224)  
+    x = torch.randn(2, 3, 16, 224, 224)  
     out = teacher_model(x)
     print(out[0].shape)  # K, B, 1961, 768
     print(out[1].shape)  # Attention weights shape  B*T, 49
@@ -87,12 +89,11 @@ def test_clip_teacher():
 def test_clap_teacher():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     clap_model = ClapModel.from_pretrained("laion/clap-htsat-fused").to(device)
-
     clap_encoder = clap_model.audio_model
     weight_path = '/data/wanglinge/project/cav-mae/src/weight/teacher/clap.pth'
     clap_encoder.load_state_dict(torch.load(weight_path, map_location=device), strict=True)
     teacher_model = clap_encoder
-    audio = torch.randn(1, 1, 1024, 64).to(device)  # 假设的输入音频特征
+    audio = torch.randn(1, 1, 1024, 64).to(device)  # 假设的输入音频特征, B
     teacher_model = teacher_model.to(device)
     out = teacher_model(audio, is_longer=torch.tensor([1]).bool().to(device), output_attentions=torch.tensor([True]).bool().to(device), return_dict=True)
     clap_feat = out.last_hidden_state  # 1, 768, 2, 32
@@ -102,6 +103,6 @@ def test_clap_teacher():
     
 
 if __name__ == "__main__":
-    test_clip_teacher()
+    # test_clip_teacher()
     # test_cross_mamba()
-    # test_clap_teacher()
+    test_clap_teacher()

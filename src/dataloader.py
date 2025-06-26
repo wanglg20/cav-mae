@@ -105,7 +105,7 @@ def preemphasis(signal,coeff=0.97):
 class AudiosetDataset(Dataset):
     def __init__(self, dataset_json_file, audio_conf, label_csv=None, vision='image', align = False, 
                  num_frames=10, audio_seg_len = 4, modality='both', raw = 'k700', use_mask=False, 
-                 num_v_patches=196, num_a_patches=64, mask_ratio=0.75):
+                 num_v_patches=196, num_a_patches=64, mask_ratio=0.75, video_frame_dir=None):
         """
         Dataset that manages audio recordings
         :param audio_conf: Dictionary containing the audio loading and preprocessing settings
@@ -123,7 +123,8 @@ class AudiosetDataset(Dataset):
         self.num_v_patches = num_v_patches
         self.num_a_patches = num_a_patches
         self.mask_ratio = mask_ratio
-
+        self.video_frame_dir = video_frame_dir
+        
         self.raw = raw
         self.datapath = dataset_json_file
         with open(dataset_json_file, 'r') as fp:
@@ -328,6 +329,8 @@ class AudiosetDataset(Dataset):
         if random.random() < self.mixup:
             datum = self.data[index]
             datum = self.decode_data(datum)
+            if self.video_frame_dir != None:
+                datum['video_path'] = self.video_frame_dir  # overwrite the video path if specified
             mix_sample_idx = random.randint(0, self.num_samples-1)
             mix_datum = self.data[mix_sample_idx]
             mix_datum = self.decode_data(mix_datum)
@@ -362,6 +365,8 @@ class AudiosetDataset(Dataset):
             #print("args:", self.modality)
             datum = self.data[index]
             datum = self.decode_data(datum)
+            if self.video_frame_dir != None:
+                datum['video_path'] = self.video_frame_dir  # overwrite the video path if specified
             # label smooth for negative samples, epsilon/label_num
             label_indices = np.zeros(self.label_num) + (self.label_smooth / self.label_num)
             try:
@@ -383,10 +388,10 @@ class AudiosetDataset(Dataset):
                             print('there is an error in loading image')
                         
                 elif self.vision == 'video':
-                    frame_id = range(10)
+                    frame_id = range(self.num_frames)
                     path1 = self.randselect_img(datum['video_id'], datum['video_path'])
-                    image_paths = [datum['video_path'] + '/frame_' + str(frame_id[i]) + '/' + datum['video_id'] + '.jpg' for i in range(10)]
-                    images = [self.get_image(image_paths[i], None, 0) for i in range(10)]
+                    image_paths = [datum['video_path'] + '/frame_' + str(frame_id[i]) + '/' + datum['video_id'] + '.jpg' for i in range(self.num_frames)]
+                    images = [self.get_image(image_paths[i], None, 0) for i in range(self.num_frames)]
                     image = torch.stack(images, dim=0)
                 else:
                     raise ValueError('vision should be image or video')
@@ -443,13 +448,11 @@ if __name__ == '__main__':
     # test the dataloader
     audio_conf = {'num_mel_bins': 128, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
               'noise':True, 'label_smooth': 0, 'im_res': 224}
-    # dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700_val.json', audio_conf, label_csv='data/info/k700_class.csv', vision='video', align=True, modality='audioonly')
-    # dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/as/data/unbalanced_train_segments_valid.json', audio_conf, 
-    #     label_csv='/data/wanglinge/project/cav-mae/src/data/info/as/data/as_label.csv',  modality='audioonly', raw='as200k')
-    dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700/k700_val.json', audio_conf, num_frames=16,
-                               label_csv='/data/wanglinge/project/cav-mae/src/data/info/k700/k700_class.csv',  modality='both', raw='k700', vision='video', use_mask=True)
+    dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700_train.json', audio_conf, num_frames=16,
+                               label_csv='/data/wanglinge/project/cav-mae/src/data/info/k700_class.csv',  modality='both', 
+                               raw='k700', vision='video', use_mask=True, video_frame_dir='/data/wanglinge/project/cav-mae/src/data/k700/train_16f')
     print('dataset length is {:d}'.format(len(dataset)))
-    loader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=False, num_workers=0)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True, num_workers=0)
     loss = torch.nn.CrossEntropyLoss()
     from traintest_ft import *
     for i, (fbank, image, label_indices, mask, mask_v, mask_a) in enumerate(loader):

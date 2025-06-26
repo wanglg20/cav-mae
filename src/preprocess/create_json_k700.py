@@ -72,10 +72,10 @@ def generate_json_manifest(csv_path, output_json, audio_base_dir, video_frame_ba
 
 if __name__ == "__main__":
     # 配置参数
-    CSV_PATH =  '/data/wanglinge/project/cav-mae/src/data/info/k700/k700_train.csv'  # 输入CSV文件路径
-    OUTPUT_JSON = '/data/wanglinge/project/cav-mae/src/data/info/k700/k700_train.json'  # 输出JSON路径
-    AUDIO_BASE_DIR = "/data/wanglinge/dataset/k700/audio"  # 音频文件根目录
-    VIDEO_FRAME_DIR = "/data/wanglinge/dataset/k700/frames_16"  # 视频帧根目录
+    CSV_PATH =  '/data/wanglinge/project/cav-mae/src/data/info/k700_train_with_label.csv'  # 输入CSV文件路径
+    OUTPUT_JSON = '/data/wanglinge/project/cav-mae/src/data/info/k700/k700_train_16f.json'  # 输出JSON路径
+    AUDIO_BASE_DIR = "/data/wanglinge/project/cav-mae/src/data/k700/train/audio"  # 音频文件根目录
+    VIDEO_FRAME_DIR = "/data/wanglinge/project/cav-mae/src/data/k700/train_16f"  # 视频帧根目录
 
     # 执行生成
     try:

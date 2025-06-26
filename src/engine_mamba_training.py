@@ -44,15 +44,19 @@ def attn_mask_generator(attn, mask_ratio, num_frames):
     Returns:
         bool_masked_pos (torch.Tensor): Boolean mask of shape (B, N) indicating which positions are masked.
     """
+    # get attn logits:
+    attn = attn.softmax(dim=-1)  # Apply softmax to get probabilities
+
     BT, N = attn.shape
     T = num_frames
     B = BT // T
     bool_masked_pos = torch.ones((BT, N), dtype=torch.bool, device=attn.device)
     num_mask = int(N * mask_ratio)
     N_vis = N - num_mask
-    pos_1 = torch.arrange(BT, device=attn.device).view(-1, 1).repeat(1, BT)
+    pos_1 = torch.arange(BT, device=attn.device).view(-1, 1).repeat(1, N_vis)
     importance = torch.multinomial(attn, N)
     pos_2 = importance[:, :N_vis]
+    # print("pos_1 shape: ", pos_1.shape, "pos_2 shape: ", pos_2.shape)
     bool_masked_pos[pos_1, pos_2] = 0
     bool_masked_pos = bool_masked_pos.view(B, -1)
     return bool_masked_pos
@@ -105,6 +109,13 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
     model = model.to(device)
     model.train()
     model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    teacher_v = teacher_v.to(device)
+    teacher_a = teacher_a.to(device)
+    teacher_v.eval()
+    teacher_a.eval()
+    teacher_v = DDP(teacher_v, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    teacher_a = DDP(teacher_a, device_ids=[local_rank], output_device= local_rank, find_unused_parameters=True)
+    
     torch.set_grad_enabled(True)
 
     batch_time, per_sample_time, data_time, per_sample_data_time, per_sample_dnn_time = AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter()
@@ -136,7 +147,6 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
     scaler = GradScaler()
     
     loss_distillation = nn.MSELoss()
-    loss_contrastive 
 
     print("current #steps=%s, #epochs=%s" % (global_step, epoch))
     print("start training...")
@@ -151,6 +161,8 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
         print("current #epochs=%s, #steps=%s" % (epoch, global_step))
         print('current masking ratio is {:.3f} for both modalities; audio mask mode {:s}'.format(args.masking_ratio, args.mask_mode))
         for i, (a_input, v_input, _, mask, mask_v, mask_a) in enumerate(train_loader):
+            #print("input shape: ", a_input.shape, v_input.shape, mask.shape, mask_v.shape, mask_a.shape)
+            #torch.Size([10, 1024, 64]) torch.Size([10, 16, 3, 224, 224]) torch.Size([10, 16, 216]) torch.Size([10, 16, 196]) torch.Size([10, 16, 4])
             B, T, C, H, W = v_input.shape
             a_input = a_input.to(device, non_blocking=True)
             v_input = v_input.to(device, non_blocking=True)
@@ -163,13 +175,15 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
             # Teacher Model Forward Pass
             with torch.no_grad():
                 # Clip pipeline and visual mask
-                clip_target, clip_attn = teacher_v(v_input), # K, B, 1961, 768
+                v_input = v_input.permute(0, 2, 1, 3, 4)  # B, C, T, H, W
+                clip_target, clip_attn = teacher_v(v_input) # K, B, 1961, 768
                 mask_v = attn_mask_generator(clip_attn, args.mask_ratio, T)  # B, 1960
                 C_CLIP = clip_target.shape[-1]  # 512
                 mask_v = mask_v.reshape(B, T, -1)
                 
                 # Clap pipeline and audio mask
-                audio_outputs = teacher_a(is_longer=torch.tensor([True]).bool().to(device), output_attentions=torch.tensor([True]).bool().to(device))
+                clap_input = a_input.unsqueeze(1)  # B, 1, 1024, 64
+                audio_outputs = teacher_a(clap_input, is_longer=torch.tensor([True]).bool().to(device), output_attentions=torch.tensor([True]).bool().to(device))
                 clap_target, clap_attn = audio_outputs.last_hidden_state, audio_outputs.attentions[-1]
                 _, C_CLAP, num_freq_bins, _ = clap_target.shape  # B, 768, 2, 32
                 # clap_target = clap_target.reshape(B, D, num_freq_bins, T, -1).permute(0, 1, 3, 2, 4) # B, 768, num_frmaes, num_freq_bins, num_time_bins
@@ -181,28 +195,36 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
                 mask_a = mask_a.reshape(B, T, 2, 2)
                 mask_a = mask_a.repeat_interleave(2, dim=-1).repeat_interleave(2, dim=-2)  # B, T, 4, 4
                 mask_a = mask_a.reshape(B, T, -1)  # B, 16, 16
-
+                mask_v = mask_v.bool().to(device)
+                mask_a = mask_a.bool().to(device)
                 zeros = torch.zeros(B, T, 1).bool().to(device)  # B, T, 1
                 mask = torch.cat([zeros, mask_v, zeros, zeros, mask_a, zeros], dim=2)  # B, T, 196 + 16 + 4
                 mask = mask.reshape(B, -1)
                 # get target features
                 mask_v = mask_v.reshape(B, -1)
-                mask_v = torch.cat((torch.ones(B, 1), mask_v), dim=1).bool()  # B, 1961  # the cls token wont join the loss calculation
+                mask_v = torch.cat((torch.ones(B, 1).to(device), mask_v), dim=1).bool()  # B, 1961  # the cls token wont join the loss calculation
                 clip_target = clip_target.squeeze(0) if len(clip_target.shape) == 4 else clip_target
                 clip_target = clip_target[~mask_v].reshape(B, -1, C_CLIP)
 
                 mask_a = mask_a_ori.reshape(B, -1)
                 clap_target = clap_target[~mask_a].reshape(B, -1, C_CLAP)
-
+                # Normalize the targets
+                clip_target = torch.nn.functional.normalize(clip_target, dim=-1)
+                clap_target = torch.nn.functional.normalize(clap_target, dim=-1)
 
             with autocast():
-                x_clip, x_clap, global_v, global_a = model(a_input, v_input, mask)
+                a_input = a_input.permute(0, 2, 1)  # B, C, T
+                #print("input shape: ", a_input.shape, v_input.shape, mask.shape)
+                x_clip, x_clap, global_v, global_a = model(v_input, a_input, mask)
                 pred_clap = x_clap[:, :, 3::4, :]               # use every 4th state as the CLAP prediction
+                global_v = global_v.mean(dim=1)  # B, 16
+                global_a = global_a.mean(dim=1)  # B, 16
                 loss_c, c_acc = contrastive_loss(global_v, global_a)
-                loss_a = loss_distillation(pred_clap, clap_target)
-                loss_v = loss_distillation(x_clip, clip_target)
+                loss_c = loss_c * 0.01
+                loss_a = loss_distillation(pred_clap, clap_target)* 10
+                loss_v = loss_distillation(x_clip, clip_target)* 10
 
-                loss = loss_a + loss_v + args.contrastive_loss_weight * loss_c
+                loss = loss_a + loss_v +  loss_c
             
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -212,6 +234,7 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
             loss_a_meter.update(loss_a.item(), B)
             loss_v_meter.update(loss_v.item(), B)
             loss_c_meter.update(loss_c.item(), B)
+            loss_av_meter.update(loss.item(), B)
             batch_time.update(time.time() - end_time)
             per_sample_time.update((time.time() - end_time)/a_input.shape[0])
             per_sample_dnn_time.update((time.time() - dnn_start_time)/a_input.shape[0])
@@ -226,10 +249,11 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
                     'iters': (epoch - 1) * len(train_loader) + i,
                     'epoch': epoch
                 })
+            args.n_print_steps = 100
             print_step = global_step % args.n_print_steps == 0
             early_print_step = epoch == 0 and global_step % (args.n_print_steps/10) == 0
             print_step = print_step or early_print_step
-
+            # print_step = True # for debug
             if print_step and global_step != 0:
                 print('Epoch: [{0}][{1}/{2}]\t'
                   'Per Sample Total Time {per_sample_time.avg:.5f}\t'
@@ -250,14 +274,12 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
             global_step += 1
 
         print('start validation')
-        eval_loss_av, eval_loss_mae, eval_loss_mae_a, eval_loss_mae_v, eval_loss_c, eval_c_acc = validate_mamba(model, test_loader, args, local_rank=local_rank)
-        print("Eval Audio MAE Loss: {:.6f}".format(eval_loss_mae_a))
-        print("Eval Visual MAE Loss: {:.6f}".format(eval_loss_mae_v))
-        print("Eval Total MAE Loss: {:.6f}".format(eval_loss_mae))
+        eval_loss_all, eval_loss_v, eval_loss_a, eval_loss_c = validate_mamba(model=model, teacher_v=teacher_v, teacher_a=teacher_a, test_loader=test_loader, args=args, local_rank=local_rank)
+ 
         print("Eval Contrastive Loss: {:.6f}".format(eval_loss_c))
-        print("Eval Total Loss: {:.6f}".format(eval_loss_av))
-        print("Eval Contrastive Accuracy: {:.6f}".format(eval_c_acc))
-
+        print("Eval Audio MAE Loss: {:.6f}".format(eval_loss_a))
+        print("Eval Visual MAE Loss: {:.6f}".format(eval_loss_v))
+        print("Eval Total Loss: {:.6f}".format(eval_loss_all))
         print("Train Audio MAE Loss: {:.6f}".format(loss_a_meter.avg))
         print("Train Visual MAE Loss: {:.6f}".format(loss_v_meter.avg))
         print("Train Contrastive Loss: {:.6f}".format(loss_c_meter.avg))
@@ -265,7 +287,7 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
 
         # train audio mae loss, train visual mae loss, train contrastive loss, train total loss
         # eval audio mae loss, eval visual mae loss, eval contrastive loss, eval total loss, eval contrastive accuracy, lr
-
+        eval_loss_av = eval_loss_all
         if eval_loss_av < best_loss:
             best_loss = eval_loss_av
             best_epoch = epoch
@@ -300,3 +322,68 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
         loss_c_meter.reset()
 
 
+def validate_mamba(model, teacher_v, teacher_a, test_loader, args, local_rank=0):
+    """
+    Validate the Mamba model on the test dataset.
+    Args:
+        model (torch.nn.Module): The Mamba model to be validated.
+        test_loader (torch.utils.data.DataLoader): DataLoader for the test dataset.
+        args: Arguments containing configuration parameters.
+        local_rank (int): Local rank for distributed training.
+    Returns:
+        tuple: Average loss and accuracy metrics.
+    """
+    device = torch.device(f'cuda:{local_rank}')
+    model.eval()
+    model = model.to(device)
+    
+    loss_av_meter, loss_a_meter, loss_v_meter, loss_c_meter = AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter()
+    c_acc_meter = AverageMeter()
+    loss_distillation = nn.MSELoss()
+    with torch.no_grad():
+        for i, (a_input, v_input, _, mask, mask_v, mask_a) in enumerate(test_loader):
+            # Teacher Model Forward Pass
+            B, T, C, H, W = v_input.shape
+            clip_target, clip_attn = teacher_v(v_input), # K, B, 1961, 768
+            mask_v = attn_mask_generator(clip_attn, args.mask_ratio, T)  # B, 1960
+            C_CLIP = clip_target.shape[-1]  # 512
+            mask_v = mask_v.reshape(B, T, -1)
+            
+            # Clap pipeline and audio mask
+            audio_outputs = teacher_a(is_longer=torch.tensor([True]).bool().to(device), output_attentions=torch.tensor([True]).bool().to(device))
+            clap_target, clap_attn = audio_outputs.last_hidden_state, audio_outputs.attentions[-1]
+            _, C_CLAP, num_freq_bins, _ = clap_target.shape  # B, 768, 2, 32
+            # clap_target = clap_target.reshape(B, D, num_freq_bins, T, -1).permute(0, 1, 3, 2, 4) # B, 768, num_frmaes, num_freq_bins, num_time_bins
+            clap_target = rearrange(clap_target, 'b d freq_bins (t time_bins) -> b d t freq_bins time_bins', t=T) # B, 768, num_frames, num_freq_bins, num_time_bins
+            clap_target = clap_target.flatten(start_dim=2)  # B, 768, (T * freq_bins * time_bins)
+            clap_target = clap_target.permute(0, 2, 1)  # B, 64, 768; 64 = num_frames * num_freq_bins * num_time_bins
+            
+            mask_a_ori = mask_a.clone() # B, T, 4
+            mask_a = mask_a.reshape(B, T, 2, 2)
+            mask_a = mask_a.repeat_interleave(2, dim=-1).repeat_interleave(2, dim=-2)  # B, T, 4, 4
+            mask_a = mask_a.reshape(B, T, -1)  # B, 16, 16
+
+            zeros = torch.zeros(B, T, 1).bool().to(device)  # B, T, 1
+            mask = torch.cat([zeros, mask_v, zeros, zeros, mask_a, zeros], dim=2)  # B, T, 196 + 16 + 4
+            mask = mask.reshape(B, -1)
+            # get target features
+            mask_v = mask_v.reshape(B, -1)
+            mask_v = torch.cat((torch.ones(B, 1), mask_v), dim=1).bool()  # B, 1961  # the cls token wont join the loss calculation
+            clip_target = clip_target.squeeze(0) if len(clip_target.shape) == 4 else clip_target
+            clip_target = clip_target[~mask_v].reshape(B, -1, C_CLIP)
+
+            mask_a = mask_a_ori.reshape(B, -1)
+            clap_target = clap_target[~mask_a].reshape(B, -1, C_CLAP)
+
+            x_clip, x_clap, global_v, global_a = model(a_input, v_input, mask)
+            pred_clap = x_clap[:, :, 3::4, :]               # use every 4th state as the CLAP prediction
+            loss_c, c_acc = contrastive_loss(global_v, global_a)
+            loss_a = loss_distillation(pred_clap, clap_target)
+            loss_v = loss_distillation(x_clip, clip_target)
+            loss_av = loss_a + loss_v + args.contrastive_loss_weight * loss_c
+            loss_a_meter.update(loss_a.item(), B)
+            loss_v_meter.update(loss_v.item(), B)   
+            loss_c_meter.update(loss_c.item(), B)
+            loss_av_meter.update(loss_av.item(), B)
+        return loss_av_meter.avg, loss_v_meter.avg, loss_a_meter.avg, loss_c_meter.avg
+        
