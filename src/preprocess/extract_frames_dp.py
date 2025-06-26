@@ -65,12 +65,12 @@ if __name__ == "__main__":
     parser = ArgumentParser(description="Extract frames from videos")
     parser.add_argument(
         "-input_file_list", type=str,
-        default='/data/wanglinge/project/cav-mae/src/data/info/k700_val.csv',
+        default='/data/wanglinge/project/cav-mae/src/data/info/k700/k700_val.csv',
         help="input file list"
     )
     parser.add_argument(
         "-target_fold", type=str,
-        default='/data/wanglinge/project/cav-mae/src/data/k700/val_16f',
+        default='/data/wanglinge/dataset/k700/frames_16',
         help="folder to save extracted frames"
     )
     parser.add_argument(
@@ -84,7 +84,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     input_filelist = np.loadtxt(args.input_file_list, dtype=str, delimiter=',')
-    tasks = [(path, args.target_fold, args.extract_frame_num) for path in input_filelist]
+    tasks = [(path, args.target_fold, args.extract_frame_num) for path, _ in input_filelist]
     n_workers = args.num_workers
 
     # 批次提交任务，减少内存积压
@@ -109,3 +109,12 @@ if __name__ == "__main__":
     #         results.append(_)
     
     # print(f'[INFO] Done. {len([r for r in results if r is not None])} videos processed successfully.')
+
+
+
+# Results:
+#     📊 Statistics:
+#    - Total input pairs: 542356
+#    - Valid pairs: 467265
+#    - Invalid/Missing pairs: 75091
+#    - Success rate: 86.15%

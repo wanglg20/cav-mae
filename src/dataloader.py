@@ -245,7 +245,8 @@ class AudiosetDataset(Dataset):
     def _wav2fbank(self, filename, filename2=None, mix_lambda=-1):
         # no mixup
         if filename2 == None:
-            waveform, sr = torchaudio.load(filename)    #([1, 160269])
+            waveform, sr = torchaudio.load(filename)   
+            #print("original waveform shape is ", waveform.shape) # 1, 160173
             waveform = waveform - waveform.mean()
         # mixup
         else:
@@ -446,20 +447,22 @@ class AudiosetDataset(Dataset):
     
 if __name__ == '__main__':
     # test the dataloader
-    audio_conf = {'num_mel_bins': 128, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
+    audio_conf = {'num_mel_bins': 64, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
               'noise':True, 'label_smooth': 0, 'im_res': 224}
-    dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700_train.json', audio_conf, num_frames=16,
-                               label_csv='/data/wanglinge/project/cav-mae/src/data/info/k700_class.csv',  modality='both', 
-                               raw='k700', vision='video', use_mask=True, video_frame_dir='/data/wanglinge/project/cav-mae/src/data/k700/train_16f')
+    dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700/k700_train_valid.json', audio_conf, num_frames=16,
+                               label_csv='/data/wanglinge/project/cav-mae/src/data/info/k700/k700_class.csv',  modality='both', 
+                               raw='k700', vision='video', use_mask=True, video_frame_dir='/data/wanglinge/dataset/k700/frames_16')
     print('dataset length is {:d}'.format(len(dataset)))
-    loader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True, num_workers=0)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=False, num_workers=0)
     loss = torch.nn.CrossEntropyLoss()
     from traintest_ft import *
     for i, (fbank, image, label_indices, mask, mask_v, mask_a) in enumerate(loader):
-        print(fbank.shape)      # B, 1024, 128
-        print(image.shape)      # B, 10, 3, 224, 224
-        print(label_indices.shape)
-        print(mask.shape)
-        print(mask_v.shape)
-        print(mask_a.shape)    # B, 16, 4
-        break
+        # print(fbank.shape)      # B, 1024, 128
+        # print(image.shape)      # B, 10, 3, 224, 224
+        # print(label_indices.shape)
+        # print(mask.shape)
+        # print(mask_v.shape)
+        # print(mask_a.shape)    # B, 16, 4
+        print("present idx:", i, end='\r')
+        if i > 1000:
+            break

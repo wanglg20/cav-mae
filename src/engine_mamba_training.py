@@ -169,8 +169,7 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
             per_sample_data_time.update((time.time() - end_time) / a_input.shape[0])
             dnn_start_time = time.time()
             
-            
-
+        
             # Teacher Model Forward Pass - Optimized for memory efficiency
             with torch.no_grad():
                 # Pre-create reusable tensors
@@ -269,7 +268,7 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
                     'iters': (epoch - 1) * len(train_loader) + i,
                     'epoch': epoch
                 })
-            args.n_print_steps = 100
+            args.n_print_steps = 1
             print_step = global_step % args.n_print_steps == 0
             early_print_step = epoch == 0 and global_step % (args.n_print_steps/10) == 0
             print_step = print_step or early_print_step
@@ -442,4 +441,4 @@ def validate_mamba(model, teacher_v, teacher_a, test_loader, args, local_rank=0)
             loss_c_meter.update(loss_c.item(), B)
             loss_av_meter.update(loss.item(), B)
         return loss_av_meter.avg, loss_v_meter.avg, loss_a_meter.avg, loss_c_meter.avg
-        
+

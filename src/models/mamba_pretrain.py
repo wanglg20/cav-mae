@@ -404,6 +404,130 @@ class CrossMamba(nn.Module):
         return x_clip, x_clap, global_v, global_a
 
 
+class CrossMambaFT(nn.Module): 
+    def __init__(
+            self,
+            # Patch embedding parameters
+            img_size=224,
+            audio_length=960,               # 960 mod 16*10 = 0, ensure audio length is divisible by 16*10
+            num_bins = 64,
+            patch_size=16,
+            embed_dim=768,
+            kernel_size=1,
+            # Mamba parameters
+            fused_add_norm=True,
+            rms_norm=True, 
+            residual_in_fp32=True,
+            bimamba=True,
+            initializer_cfg=None,
+            ssm_cfg=None, 
+            norm_epsilon=1e-5,
+            # CLIP and clap decoder parameters# clip,
+            clip_decoder_embed_dim=768,
+            clap_output_dim=768,
+            clip_output_dim=512,
+            clip_norm_type='l2',
+            clip_return_layer=1,
+            clip_student_return_interval=1,
+            # Model general parameters
+            depth=32,
+            drop_path_rate=0.4,
+            num_frames=10,
+            device=None,
+            dtype=None,
+            # Cross-Modality parameters
+            use_global_pooling = False,
+            # Classification parameters
+            num_classes=700,
+            fc_drop_rate=0.,
+            
+    ):
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        # Patch embedding
+        self.patch_embed_v = PatchEmbedVideo(
+            img_size=img_size,
+            patch_size=patch_size,
+            embed_dim=embed_dim,
+            in_chans=3,
+            kernel_size=kernel_size,
+        )
+        self.patch_embed_a = PatchEmbedImg(
+            img_size=img_size,
+            patch_size=patch_size,
+            embed_dim=embed_dim,
+            in_chans=1,
+        )
+
+        # Mamba parameters
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+        inter_dpr = [0.0] + dpr
+        self.residual_in_fp32 = residual_in_fp32
+        self.fused_add_norm = fused_add_norm
+        self.bimamba = bimamba
+        self.layers = nn.ModuleList(
+            [
+                create_block(
+                    embed_dim,
+                    ssm_cfg=ssm_cfg,
+                    norm_epsilon=norm_epsilon,
+                    rms_norm=rms_norm,
+                    residual_in_fp32=residual_in_fp32,
+                    fused_add_norm=fused_add_norm,
+                    layer_idx=i,
+                    bimamba=bimamba,
+                    drop_path=inter_dpr[i],
+                    #**factory_kwargs,
+                )
+                for i in range(depth)
+            ]
+        )
+
+
+        # General model parameters
+        self.d_model = self.num_features = self.embed_dim = embed_dim
+        self.depth = depth
+        self.num_frames = num_frames
+        
+        self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
+        
+        # cls token and position embedding
+        self.patch_embed_a.num_patches = int(audio_length * num_bins / 256) #(audio_len / 16) * (audio_channels / 16)
+        self.num_patches_v = int(img_size * img_size / (patch_size * patch_size)) # H*W / (P*P), 196 = 14*14 by default; 
+        self.num_patches_a = self.patch_embed_a.num_patches // num_frames 
+        self.cls_token_v = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.cls_token_a = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.use_global_pooling = use_global_pooling
+        if self.use_global_pooling:               # use global pooling head to get global token
+            self.global_pooling_head_v = GlobalPoolingHead(embed_dim)
+            self.global_pooling_head_a = GlobalPoolingHead(embed_dim)
+        else:                                   # use learnable global token
+            self.global_token_v = nn.Parameter(torch.zeros(1, 1, embed_dim))
+            self.global_token_a = nn.Parameter(torch.zeros(1, 1, embed_dim))
+            # self.num_patches_v += 1
+            # self.num_patches_a += 1
+            trunc_normal_(self.cls_token_a, std=.02)
+            trunc_normal_(self.cls_token_v, std=.02)
+
+        self.pos_embed_v = nn.Parameter(torch.zeros(1, self.num_patches_v, embed_dim))
+        self.pos_embed_a = nn.Parameter(torch.zeros(1, self.num_patches_a, embed_dim))
+        self.temporal_pos_embed_v = nn.Parameter(torch.zeros(1, num_frames // kernel_size, embed_dim))
+        self.temporal_pos_embed_a = nn.Parameter(torch.zeros(1, num_frames // kernel_size, embed_dim))
+        pos_embed_v = get_sinusoid_encoding_table(self.num_patches_v, embed_dim)
+        pos_embed_a = get_sinusoid_encoding_table(self.num_patches_a, embed_dim)
+        self.pos_embed_v.data.copy_(pos_embed_v.float())
+        self.pos_embed_a.data.copy_(pos_embed_a.float())
+        self.temporal_pos_embed_v.data.copy_(torch.zeros(1, num_frames // kernel_size, embed_dim).float())
+        self.temporal_pos_embed_a.data.copy_(torch.zeros(1, num_frames // kernel_size, embed_dim).float())
+        # output head:
+        fc_drop_rate=0.,
+        self.head_drop = nn.Dropout(fc_drop_rate) if fc_drop_rate > 0 else nn.Identity()
+        self.head_v = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+        self.head_a = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+
+    def forward():
+        return
+
 if __name__ == '__main__':
     # Test Script, run in the root directory of the project
     import warnings

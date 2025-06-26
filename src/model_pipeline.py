@@ -103,6 +103,6 @@ def test_clap_teacher():
     
 
 if __name__ == "__main__":
-    # test_clip_teacher()
-    # test_cross_mamba()
+    test_clip_teacher()
+    test_cross_mamba()
     test_clap_teacher()
