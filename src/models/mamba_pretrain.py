@@ -1,5 +1,7 @@
 # Copyright (c) 2015-present, Facebook, Inc.
 # All rights reserved.
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 import torch
 import torch.nn as nn
 from functools import partial
@@ -32,6 +34,29 @@ def segm_init_weights(m):
         nn.init.constant_(m.bias, 0)
         nn.init.constant_(m.weight, 1.0)
 
+def load_from_pretrained(model, pretrained_path: str, strict: bool = False):
+        """
+        Load model weights from a pre-trained CrossMamba checkpoint.
+        
+        Args:
+            pretrained_path (str): Path to the pre-trained model checkpoint.
+        """
+        state_dict = torch.load(pretrained_path, map_location='cpu')
+        # Remove 'module.' prefix if present
+        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+        # Remove Decoder-related keys
+        keys_to_remove = [
+            'clip_decoder', 
+            'clap_decoder', 
+            'clip_pos_embed', 
+            'clap_pos_embed', 
+            'return_index'
+        ]
+        for key in keys_to_remove:
+            state_dict = {k: v for k, v in state_dict.items() if key not in k}
+        # Load the state_dict into the model
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=strict)
+        return missing_keys, unexpected_keys
 
 class GlobalPoolingHead(nn.Module):
     """
@@ -83,7 +108,7 @@ class CrossMamba(nn.Module):
             self,
             # Patch embedding parameters
             img_size=224,
-            audio_length=960,               # 960 mod 16*10 = 0, ensure audio length is divisible by 16*10
+            audio_length=1024,               # 960 mod 16*10 = 0, ensure audio length is divisible by 16*10
             num_bins = 64,
             patch_size=16,
             embed_dim=768,
@@ -106,7 +131,7 @@ class CrossMamba(nn.Module):
             # Model general parameters
             depth=32,
             drop_path_rate=0.4,
-            num_frames=10,
+            num_frames=16,
             device=None,
             dtype=None,
             # Cross-Modality parameters
@@ -451,16 +476,26 @@ class CrossMambaFT(CrossMamba):
         # Add classification heads
         self.num_classes = num_classes
         self.head_drop = nn.Dropout(fc_drop_rate) if fc_drop_rate > 0 else nn.Identity()
-        self.head_v = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
-        self.head_a = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
-        
+        # self.head_v = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        # self.head_a = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        self.head = nn.Sequential(
+            nn.LayerNorm(self.embed_dim),
+            nn.Linear(self.embed_dim, num_classes)
+        )
+
         # Initialize classification heads
-        if isinstance(self.head_v, nn.Linear):
-            trunc_normal_(self.head_v.weight, std=.02)
-            nn.init.constant_(self.head_v.bias, 0)
-        if isinstance(self.head_a, nn.Linear):
-            trunc_normal_(self.head_a.weight, std=.02)
-            nn.init.constant_(self.head_a.bias, 0)        
+        self.head.apply(segm_init_weights)
+        
+        # 确保LayerNorm和Linear的初始化正确
+        for m in self.head.modules():
+            if isinstance(m, nn.Linear):
+                trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)  
+
 
     def forward_features(self, x_v: Tensor, x_a: Tensor) -> Tensor:
         """
@@ -593,25 +628,20 @@ class CrossMambaFT(CrossMamba):
         else:
             # Use global tokens (last tokens for each modality)
             N_v = self.num_patches_v + 2  # +1 for cls, +1 for global
-            global_v = features[:, :, N_v-1, :]  # B, T, D (global video token)
-            global_a = features[:, :, -1, :]     # B, T, D (global audio token)
-            
-            # Average global tokens over time
-            cls_v = global_v.mean(dim=1)  # B, D
-            cls_a = global_a.mean(dim=1)  # B, D
-        
-        # Apply dropout and classification heads
-        cls_v = self.head_drop(cls_v)
-        cls_a = self.head_drop(cls_a)
-        
-        logits_v = self.head_v(cls_v)  # B, num_classes
-        logits_a = self.head_a(cls_a)  # B, num_classes
-        
+            # Use all tokens for classification:
+            global_v = features[:, :, :N_v, :]  # B, T, num_patches_v+2, D
+            global_a = features[:, :, N_v:, :]   # B, T, num_patches_v_a+2, D
+            global_feat = torch.concatenate((global_v, global_a), dim=-2)  # B, T, N_total, D
+            global_feat = global_feat.mean(dim=1)  # B, N_total, D
+
+        head_input = global_feat.mean(dim=1)  # B, D
+        logits = self.head_drop(head_input)  # Apply dropout
+        logits = self.head(logits)  # Final classification layer
+
         return {
-            'logits_v': logits_v,
-            'logits_a': logits_a,
-            'features_v': cls_v,
-            'features_a': cls_a
+            'logits': logits,
+            'feat_v': global_v,
+            'feat_a': global_a,
         }
 
 if __name__ == '__main__':

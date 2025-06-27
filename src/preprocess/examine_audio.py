@@ -50,14 +50,3 @@ print(f"   - Valid pairs: {len(valid_json_data['data'])}")
 print(f"   - Invalid/Missing pairs: {len(data) - len(valid_json_data['data'])}")
 print(f"   - Success rate: {len(valid_json_data['data'])/len(data)*100:.2f}%")
 
-# 如果没有tqdm，可以使用这个简单版本：
-# 取消注释下面的代码，并注释掉tqdm相关代码
-
-# def simple_progress(current, total, desc="Processing"):
-#     percent = (current / total) * 100
-#     print(f"\r{desc}: {current}/{total} ({percent:.1f}%)", end="", flush=True)
-
-# 然后在循环中使用：
-# for i, item in enumerate(data):
-#     simple_progress(i+1, len(data), "Processing audio-video pairs")
-#     # ... 其余处理逻辑

@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+# Mod by Linge Wang
+
+# Originally from:
 # @Time    : 6/10/21 11:00 PM
 # @Author  : Yuan Gong
 # @Affiliation  : Massachusetts Institute of Technology
@@ -120,17 +123,31 @@ def train(audio_model, train_loader, test_loader, args, local_rank):
     print('Total newly initialized MLP parameter number is : {:.3f} million'.format(sum(p.numel() for p in mlp_params) / 1e6))
     print('Total pretrained backbone parameter number is : {:.3f} million'.format(sum(p.numel() for p in base_params) / 1e6))
 
+    # Learning rate scheduler selection strategy:
+    # 1. ReduceLROnPlateau: Good for exploration and hyperparameter tuning
+    #    - Pros: Adaptive, prevents overfitting, no need to preset decay epochs
+    #    - Cons: Non-reproducible, computationally expensive, may be too conservative
+    # 2. MultiStepLR: Better for final experiments and paper results
+    #    - Pros: Reproducible, efficient, predictable, stable
+    #    - Cons: Requires domain knowledge, less adaptive
+    # 
+    # Recommendation: Use ReduceLROnPlateau for initial experiments to find good decay points,
+    # then switch to MultiStepLR with fixed milestones for final reproducible results
+    
     # only for preliminary test, formal exps should use fixed learning rate scheduler
     if args.lr_adapt == True:
+        # Adaptive scheduler: good for exploration but less reproducible
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=args.lr_patience, verbose=True)
         print('Override to use adaptive learning rate scheduler.')
     else:
+        # Fixed scheduler: better for reproducible final results
+        # Consider using decay points found from ReduceLROnPlateau experiments
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, list(range(args.lrscheduler_start, 1000, args.lrscheduler_step)),gamma=args.lrscheduler_decay)
         print('The learning rate scheduler starts at {:d} epoch with decay rate of {:.3f} every {:d} epoches'.format(args.lrscheduler_start, args.lrscheduler_decay, args.lrscheduler_step))
     main_metrics = args.metrics
-    if args.loss == 'BCE':
+    if args.loss == 'BCE':      # For multilabel classification
         loss_fn = nn.BCEWithLogitsLoss()
-    elif args.loss == 'CE':
+    elif args.loss == 'CE':     # For Single-label classification
         loss_fn = nn.CrossEntropyLoss()
     args.loss_fn = loss_fn
 

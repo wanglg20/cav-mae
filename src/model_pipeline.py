@@ -3,7 +3,7 @@ import warnings
 import torch
 
 warnings.filterwarnings("ignore", category=FutureWarning)
-from models.mamba_pretrain import CrossMamba
+from models.mamba_pretrain import CrossMamba, CrossMambaFT
 from models.videomamba_pretrain import VisionMamba
 from models.teacher import clip_b16
 from dataloader import rand_mask_generate, mask_expand2d
@@ -12,6 +12,8 @@ from transformers.models.clap.modeling_clap import ClapAudioModel
 from transformers import CLIPModel, CLIPProcessor, ClapModel, ClapProcessor
 
 def test_cross_mamba():
+    print("\n" + "=" * 50)
+    print("Testing CrossMamba (Pre-training)")
     model = CrossMamba(
         num_frames=16,
         audio_length=1024,
@@ -102,7 +104,58 @@ def test_clap_teacher():
 # def test_clap_teacher():
     
 
+def test_cross_mamba_ft():
+    # Test CrossMambaFT (for fine-tuning)
+    print("\n" + "=" * 50)
+    print("Testing CrossMambaFT (Fine-tuning)")
+    print("=" * 50)
+    model_ft = CrossMambaFT(num_classes=700, fc_drop_rate=0.1)
+    print("CrossMambaFT model created successfully.")
+    print(f"Number of classes: {model_ft.num_classes}")
+
+    prob_keys = [k for k, v in model_ft.named_parameters() if v.requires_grad and k.startswith('head')]
+    print("Probing parameters:")
+    print(prob_keys)
+    import torch
+    device = torch.device("cuda")
+
+    # Test inputs
+    v = torch.randn(1, 3, 16, 224, 224)  # Video input
+    a = torch.randn(1, 64, 1024)         # Audio input
+    
+    # Test mask for pre-training
+    ones = torch.ones(1, 10)
+    mask = torch.cat([
+        ones,
+        torch.ones(1, 10 * int(14 * 14 * 0.75)),
+        torch.zeros(1, 10 * int(14 * 14 * 0.25)),
+        ones,
+        ones,     
+        torch.ones(1, 10 * int(6 * 8 * 0.75)),      # 6 = 960 / 10 / 16
+        torch.zeros(1, 10 * int(6 * 8 * 0.25)),
+        ones, 
+    ], dim=-1).to(torch.bool)
+
+    # Move to device
+    model_ft = model_ft.to(device)
+    v = v.to(device)
+    a = a.to(device)
+    mask = mask.to(device)
+    # Test fine-tuning model
+    print("\nTesting fine-tuning forward pass...")
+    try:
+        with torch.no_grad():
+            outputs = model_ft(v, a)
+            print(f"Video logits shape: {outputs['logits'].shape}")
+            print(f"Video features shape: {outputs['feat_v'].shape}")
+            print(f"Audio features shape: {outputs['feat_a'].shape}")
+            print("Fine-tuning forward pass successful!")
+    except Exception as e:
+        print(f"Fine-tuning forward pass failed: {e}")
+
+
 if __name__ == "__main__":
-    test_clip_teacher()
-    test_cross_mamba()
-    test_clap_teacher()
+    # test_clip_teacher()
+    # test_cross_mamba()
+    # test_clap_teacher()
+    test_cross_mamba_ft()

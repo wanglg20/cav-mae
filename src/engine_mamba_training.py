@@ -13,6 +13,7 @@ import os
 from dataloader import rand_mask_generate, mask_expand2d
 from torch.cuda.amp import autocast,GradScaler
 import datetime
+from traintest_ft import calculate_acc, calculate_mAP
 
 def contrastive_loss(audio_rep, video_rep, bidirect_contrast=False):
     # calculate nce loss for mean-visual representation and mean-audio representation          
@@ -61,6 +62,15 @@ def attn_mask_generator(attn, mask_ratio, num_frames):
     bool_masked_pos = bool_masked_pos.view(B, -1)
     return bool_masked_pos
 
+def calculate_grad_norm(model):
+    total_norm = 0
+    parameters = [p for p in model.parameters() if p.grad is not None and p.requires_grad]
+    for p in parameters:
+        param_norm = p.grad.detach().data.norm(2)
+        total_norm += param_norm.item() ** 2
+    total_norm = total_norm ** 0.5
+
+    return total_norm
 
 def resume_training(model, optimizer, exp_dir, device):
     """
@@ -249,7 +259,7 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-
+            
             loss_a_meter.update(loss_a.item(), B)
             loss_v_meter.update(loss_v.item(), B)
             loss_c_meter.update(loss_c.item(), B)
@@ -257,7 +267,7 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
             batch_time.update(time.time() - end_time)
             per_sample_time.update((time.time() - end_time)/a_input.shape[0])
             per_sample_dnn_time.update((time.time() - dnn_start_time)/a_input.shape[0])
-
+            
             # log:
             if args.use_wandb and local_rank == 0:
                 wandb.log({
@@ -268,7 +278,7 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
                     'iters': (epoch - 1) * len(train_loader) + i,
                     'epoch': epoch
                 })
-            args.n_print_steps = 1
+            args.n_print_steps = 100
             print_step = global_step % args.n_print_steps == 0
             early_print_step = epoch == 0 and global_step % (args.n_print_steps/10) == 0
             print_step = print_step or early_print_step
@@ -441,4 +451,240 @@ def validate_mamba(model, teacher_v, teacher_a, test_loader, args, local_rank=0)
             loss_c_meter.update(loss_c.item(), B)
             loss_av_meter.update(loss.item(), B)
         return loss_av_meter.avg, loss_v_meter.avg, loss_a_meter.avg, loss_c_meter.avg
+
+def finetune_mamba(model, train_loader, test_loader, args, local_rank):
+    """
+    Engine for fine-tuning the Mamba model.
+    Args:
+        model (torch.nn.Module): The Mamba model to be fine-tuned.
+        train_loader (torch.utils.data.DataLoader): DataLoader for the training dataset.
+        test_loader (torch.utils.data.DataLoader): DataLoader for the test dataset.
+        args: Arguments containing configuration parameters.
+        local_rank (int): Local rank for distributed training.
+    args should contain the following parameters:
+
+    """
+    device = torch.device(f'cuda:{local_rank}')
+    model = model.to(device)
+    model.train()
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+
+    torch.set_grad_enabled(True)
+    batch_time, per_sample_time, data_time, per_sample_data_time, loss_meter, per_sample_dnn_time = AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter()
+    best_epoch, best_mAP, best_acc = 0, -np.inf, -np.inf
+    best_acc = 0
+    global_step, epoch = 0, 0
+    start_time = time.time()
+    exp_dir = args.exp_dir
+    
+    # Learning Rate Adjustment for linear-Probing
+    probe_param_list = [
+        k for k, v in model.named_parameters() if v.requires_grad and k.startswith('head')
+    ]
+    base_param_list = [
+        k for k, v in model.named_parameters() if v.requires_grad and not k.startswith('head')
+    ]
+    print('Total parameter number is : {:.3f} M'.format(sum(p.numel() for p in model.parameters()) / 1e6))
+    print('Total trainable parameter number is : {:.3f} M'.format(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6))
+    print('Probe parameter number is : {:.3f} M'.format(sum(p.numel() for p in model.parameters() if p.requires_grad and p in probe_param_list) / 1e6))
+    print('Base parameter number is : {:.3f} M'.format(sum(p.numel() for p in model.parameters() if p.requires_grad and p in base_param_list) / 1e6))
+    optimizer = torch.optim.Adam([{'params': base_param_list, 'lr': args.lr}, {'params': probe_param_list, 'lr': args.lr * args.head_lr}], weight_decay=5e-7, betas=(0.95, 0.999))
+    base_lr = optimizer.param_groups[0]['lr']
+    mlp_lr = optimizer.param_groups[1]['lr']
+    print('base lr, mlp lr : ', base_lr, mlp_lr)
+    # Learning rate scheduler selection strategy:
+    # Recommendation: Use ReduceLROnPlateau for initial experiments to find good decay points,
+    # then switch to MultiStepLR with fixed milestones for final reproducible results
+    
+    # only for preliminary test, formal exps should use fixed learning rate scheduler
+    if args.lr_adapt == True:
+        # Adaptive scheduler: good for exploration but less reproducible
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=args.lr_patience, verbose=True)
+        print('Override to use adaptive learning rate scheduler.')
+    else:
+        # Fixed scheduler: better for reproducible final results
+        # Consider using decay points found from ReduceLROnPlateau experiments
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, list(range(args.lrscheduler_start, 1000, args.lrscheduler_step)),gamma=args.lrscheduler_decay)
+        print('The learning rate scheduler starts at {:d} epoch with decay rate of {:.3f} every {:d} epoches'.format(args.lrscheduler_start, args.lrscheduler_decay, args.lrscheduler_step))
+    main_metrics = args.metrics
+    if args.loss == 'BCE':      # For multilabel classification
+        loss_fn = nn.BCEWithLogitsLoss()
+    elif args.loss == 'CE':     # For Single-label classification
+        loss_fn = nn.CrossEntropyLoss()
+    args.loss_fn = loss_fn
+    main_metrics = args.metrics
+    if args.loss == 'BCE':      # For multilabel classification
+        loss_fn = nn.BCEWithLogitsLoss()
+    elif args.loss == 'CE':     # For Single-label classification
+        loss_fn = nn.CrossEntropyLoss()
+    args.loss_fn = loss_fn
+
+    print('now training with {:s}, main metrics: {:s}, loss function: {:s}, learning rate scheduler: {:s}'.format(str(args.dataset), str(main_metrics), str(loss_fn), str(scheduler)))
+
+    epoch += 1
+    scaler = GradScaler()
+
+    print("current #steps=%s, #epochs=%s" % (global_step, epoch))
+    print("start training...")
+    args.n_print_steps = 10
+    model.train()
+    while epoch < args.n_epochs + 1:
+        train_loader.sampler.set_epoch(epoch)
+        test_loader.sampler.set_epoch(epoch)
+        begin_time = time.time()
+        end_time = time.time()
+        model.train()
+        print('---------------')
+        print(datetime.datetime.now())
+        print("current #epochs=%s, #steps=%s" % (epoch, global_step))
+        for i, (a_input, v_input, labels) in enumerate(train_loader):
+            B = a_input.size(0)
+            a_input, v_input = a_input.to(device, non_blocking=True), v_input.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+
+            data_time.update(time.time() - end_time)
+            per_sample_data_time.update((time.time() - end_time) / a_input.shape[0])
+            dnn_start_time = time.time()
+
+            with autocast():
+                logits = model(v_input, a_input)
+                loss = loss_fn(logits, labels)
+            
+            optimizer.zero_grad()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            grad_norm = calculate_grad_norm(model)
+            if args.use_wandb and local_rank == 0:
+                wandb.log({
+                    'FT-training loss': loss.item(),
+                    'grad_norm':grad_norm,
+                    'iters': (epoch - 1) * len(train_loader) + i,
+                    'epoch': epoch,
+                    'lr': optimizer.param_groups[0]['lr'],
+                    'mlp_lr': optimizer.param_groups[1]['lr'],
+                })
+            loss_meter.update(loss.item(), B)
+            batch_time.update(time.time() - end_time)
+            per_sample_time.update((time.time() - end_time)/a_input.shape[0])
+            per_sample_dnn_time.update((time.time() - dnn_start_time)/a_input.shape[0])
+
+            print_step = global_step % args.n_print_steps == 0
+            early_print_step = epoch == 0 and global_step % (args.n_print_steps/10) == 0
+            print_step = print_step or early_print_step
+
+            #print_step = True
+            if print_step and global_step != 0:
+                print('Epoch: [{0}][{1}/{2}]\t'
+                  'Per Sample Total Time {per_sample_time.avg:.5f}\t'
+                  'Per Sample Data Time {per_sample_data_time.avg:.5f}\t'
+                  'Per Sample DNN Time {per_sample_dnn_time.avg:.5f}\t'
+                  'Train Loss {loss_meter.val:.4f}\t'.format(
+                   epoch, i, len(train_loader), per_sample_time=per_sample_time, per_sample_data_time=per_sample_data_time,
+                      per_sample_dnn_time=per_sample_dnn_time, loss_meter=loss_meter), flush=True)
+                if np.isnan(loss_meter.avg):
+                    print("training diverged...")
+                    return
+
+            end_time = time.time()
+            global_step += 1
+
+
+        print('start validation')
+
+        if args.raw_data == 'k700':
+            acc, valid_loss =  validate_ft(model, test_loader, args, local_rank=local_rank)
+            print("acc: {:.6f}".format(acc))
+            if acc > best_acc:
+                    best_epoch = epoch
+        else:
+            mAP, valid_loss = validate_ft(model, test_loader, args, local_rank=local_rank, return_ap=True)
+            print("mAP:{:.6f}".format(mAP))
+            if mAP > best_mAP:
+                best_mAP = mAP
+                if main_metrics == 'mAP':
+                    best_epoch = epoch
+
+        print("train_loss: {:.6f}".format(loss_meter.avg))
+        print("valid_loss: {:.6f}".format(valid_loss))
+        print('validation finished')
+        if args.use_wandb and local_rank == 0:
+                wandb.log({
+                    'valid_loss': valid_loss,
+                    'epoch': epoch,
+                    #'mAP': mAP if main_metrics == 'mAP' else None,
+                    'acc': acc if main_metrics == 'acc' else None,
+                })
+
+        if best_epoch == epoch:
+            torch.save(model.state_dict(), "%s/models/best_model.pth" % (exp_dir))
+            torch.save(optimizer.state_dict(), "%s/models/best_optim_state.pth" % (exp_dir))
+        save_interval = 5
+        if args.use_video:
+            save_interval = 1
+        if args.save_model == True and (epoch % save_interval == 0 or epoch == args.n_epochs):
+            torch.save(model.state_dict(), "%s/models/model.%d.pth" % (exp_dir, epoch))
+
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            if main_metrics == 'mAP':
+                scheduler.step(mAP)
+                
+            elif main_metrics == 'acc':
+                scheduler.step(acc)
+        else:
+            scheduler.step()
+
+        print('Epoch-{0} lr: {1}'.format(epoch, optimizer.param_groups[0]['lr']))
+
+        finish_time = time.time()
+        print('epoch {:d} training time: {:.3f}'.format(epoch, finish_time-begin_time))
+
+        epoch += 1
+
+        batch_time.reset()
+        per_sample_time.reset()
+        data_time.reset()
+        per_sample_data_time.reset()
+        loss_meter.reset()
+        per_sample_dnn_time.reset()
+    return 
+
+
+
+def validate_ft(model, val_loader, args, local_rank=0, return_ap=True):
+    device = torch.device(f'cuda:{local_rank}')
+    batch_time = AverageMeter()
+    model.eval()
+
+    end = time.time()
+    A_predictions, A_targets, A_loss = [], [], []
+    with torch.no_grad():
+        for i, (a_input, v_input, labels) in enumerate(val_loader):
+            a_input = a_input.to(device)
+            v_input = v_input.to(device)
+
+            with autocast():
+                audio_output = model(v_input, a_input)
+            predictions = audio_output.to('cpu').detach()
+            predictions = torch.sigmoid(audio_output.float())
+            A_predictions.append(predictions)
+            A_targets.append(labels)
+
+            labels = labels.to(device)
+            loss = args.loss_fn(audio_output, labels)
+            
+            A_loss.append(loss.to('cpu').detach())
+
+            batch_time.update(time.time() - end)
+            end = time.time()
+
+        audio_output = torch.cat(A_predictions)
+        target = torch.cat(A_targets)
+        loss = np.mean(A_loss)
+        if return_ap:
+            metrics = calculate_mAP(audio_output, target)
+        else:
+            metrics = calculate_acc(audio_output, target, k=1)
+
 

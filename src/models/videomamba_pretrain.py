@@ -192,7 +192,7 @@ class Linear_Decoder(nn.Module):
                  norm_layer=nn.LayerNorm, clip_norm_type='l2'):
         super().__init__()
         self.clip_norm_type = clip_norm_type
-        print(f'Normalization Type: {clip_norm_type}')
+        #print(f'Normalization Type: {clip_norm_type}')
 
         self.head = nn.Linear(embed_dim, output_dim)
         self.norm = norm_layer(output_dim)

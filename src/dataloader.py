@@ -453,16 +453,17 @@ if __name__ == '__main__':
                                label_csv='/data/wanglinge/project/cav-mae/src/data/info/k700/k700_class.csv',  modality='both', 
                                raw='k700', vision='video', use_mask=True, video_frame_dir='/data/wanglinge/dataset/k700/frames_16')
     print('dataset length is {:d}'.format(len(dataset)))
-    loader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=False, num_workers=0)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
     loss = torch.nn.CrossEntropyLoss()
     from traintest_ft import *
     for i, (fbank, image, label_indices, mask, mask_v, mask_a) in enumerate(loader):
-        # print(fbank.shape)      # B, 1024, 128
-        # print(image.shape)      # B, 10, 3, 224, 224
-        # print(label_indices.shape)
-        # print(mask.shape)
-        # print(mask_v.shape)
-        # print(mask_a.shape)    # B, 16, 4
+        print(fbank.shape)      # B, 1024, 128
+        print(image.shape)      # B, 10, 3, 224, 224
+        print(label_indices.shape) # B, 700, torch.sum() = 1
+        print(mask.shape)
+        print(mask_v.shape)
+        print(mask_a.shape)    # B, 16, 4
         print("present idx:", i, end='\r')
+        break
         if i > 1000:
             break
