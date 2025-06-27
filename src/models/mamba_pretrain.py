@@ -404,144 +404,251 @@ class CrossMamba(nn.Module):
         return x_clip, x_clap, global_v, global_a
 
 
-class CrossMambaFT(nn.Module): 
+class CrossMambaFT(CrossMamba): 
+    """
+    CrossMamba model for fine-tuning with classification heads.
+    
+    This class inherits from CrossMamba and adds classification heads for both
+    video and audio modalities. It removes the CLIP/CLAP decoder components
+    that are only needed for pre-training.
+    """
     def __init__(
             self,
-            # Patch embedding parameters
-            img_size=224,
-            audio_length=960,               # 960 mod 16*10 = 0, ensure audio length is divisible by 16*10
-            num_bins = 64,
-            patch_size=16,
-            embed_dim=768,
-            kernel_size=1,
-            # Mamba parameters
-            fused_add_norm=True,
-            rms_norm=True, 
-            residual_in_fp32=True,
-            bimamba=True,
-            initializer_cfg=None,
-            ssm_cfg=None, 
-            norm_epsilon=1e-5,
-            # CLIP and clap decoder parameters# clip,
-            clip_decoder_embed_dim=768,
-            clap_output_dim=768,
-            clip_output_dim=512,
-            clip_norm_type='l2',
-            clip_return_layer=1,
-            clip_student_return_interval=1,
-            # Model general parameters
-            depth=32,
-            drop_path_rate=0.4,
-            num_frames=10,
-            device=None,
-            dtype=None,
-            # Cross-Modality parameters
-            use_global_pooling = False,
             # Classification parameters
             num_classes=700,
             fc_drop_rate=0.,
-            
+            # Inherit all other parameters from parent class
+            **kwargs
     ):
-        super().__init__()
-        factory_kwargs = {"device": device, "dtype": dtype}
-        # Patch embedding
-        self.patch_embed_v = PatchEmbedVideo(
-            img_size=img_size,
-            patch_size=patch_size,
-            embed_dim=embed_dim,
-            in_chans=3,
-            kernel_size=kernel_size,
-        )
-        self.patch_embed_a = PatchEmbedImg(
-            img_size=img_size,
-            patch_size=patch_size,
-            embed_dim=embed_dim,
-            in_chans=1,
-        )
-
-        # Mamba parameters
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
-        inter_dpr = [0.0] + dpr
-        self.residual_in_fp32 = residual_in_fp32
-        self.fused_add_norm = fused_add_norm
-        self.bimamba = bimamba
-        self.layers = nn.ModuleList(
-            [
-                create_block(
-                    embed_dim,
-                    ssm_cfg=ssm_cfg,
-                    norm_epsilon=norm_epsilon,
-                    rms_norm=rms_norm,
-                    residual_in_fp32=residual_in_fp32,
-                    fused_add_norm=fused_add_norm,
-                    layer_idx=i,
-                    bimamba=bimamba,
-                    drop_path=inter_dpr[i],
-                    #**factory_kwargs,
-                )
-                for i in range(depth)
-            ]
-        )
-
-
-        # General model parameters
-        self.d_model = self.num_features = self.embed_dim = embed_dim
-        self.depth = depth
-        self.num_frames = num_frames
+        # Remove CLIP/CLAP decoder parameters that are not needed for fine-tuning
+        clip_params_to_remove = [
+            'clip_decoder_embed_dim',
+            'clap_output_dim', 
+            'clip_output_dim',
+            'clip_norm_type',
+            'clip_return_layer',
+            'clip_student_return_interval'
+        ]
         
-        self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
+        # Filter out CLIP/CLAP parameters from kwargs
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k not in clip_params_to_remove}
         
-        # cls token and position embedding
-        self.patch_embed_a.num_patches = int(audio_length * num_bins / 256) #(audio_len / 16) * (audio_channels / 16)
-        self.num_patches_v = int(img_size * img_size / (patch_size * patch_size)) # H*W / (P*P), 196 = 14*14 by default; 
-        self.num_patches_a = self.patch_embed_a.num_patches // num_frames 
-        self.cls_token_v = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.cls_token_a = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.use_global_pooling = use_global_pooling
-        if self.use_global_pooling:               # use global pooling head to get global token
-            self.global_pooling_head_v = GlobalPoolingHead(embed_dim)
-            self.global_pooling_head_a = GlobalPoolingHead(embed_dim)
-        else:                                   # use learnable global token
-            self.global_token_v = nn.Parameter(torch.zeros(1, 1, embed_dim))
-            self.global_token_a = nn.Parameter(torch.zeros(1, 1, embed_dim))
-            # self.num_patches_v += 1
-            # self.num_patches_a += 1
-            trunc_normal_(self.cls_token_a, std=.02)
-            trunc_normal_(self.cls_token_v, std=.02)
-
-        self.pos_embed_v = nn.Parameter(torch.zeros(1, self.num_patches_v, embed_dim))
-        self.pos_embed_a = nn.Parameter(torch.zeros(1, self.num_patches_a, embed_dim))
-        self.temporal_pos_embed_v = nn.Parameter(torch.zeros(1, num_frames // kernel_size, embed_dim))
-        self.temporal_pos_embed_a = nn.Parameter(torch.zeros(1, num_frames // kernel_size, embed_dim))
-        pos_embed_v = get_sinusoid_encoding_table(self.num_patches_v, embed_dim)
-        pos_embed_a = get_sinusoid_encoding_table(self.num_patches_a, embed_dim)
-        self.pos_embed_v.data.copy_(pos_embed_v.float())
-        self.pos_embed_a.data.copy_(pos_embed_a.float())
-        self.temporal_pos_embed_v.data.copy_(torch.zeros(1, num_frames // kernel_size, embed_dim).float())
-        self.temporal_pos_embed_a.data.copy_(torch.zeros(1, num_frames // kernel_size, embed_dim).float())
-        # output head:
-        fc_drop_rate=0.,
+        # Call parent constructor without CLIP/CLAP parameters
+        super().__init__(**filtered_kwargs)
+        
+        # Remove CLIP/CLAP decoders that are not needed for fine-tuning
+        if hasattr(self, 'clip_decoder'):
+            delattr(self, 'clip_decoder')
+        if hasattr(self, 'clap_decoder'):
+            delattr(self, 'clap_decoder')
+        if hasattr(self, 'clip_pos_embed'):
+            delattr(self, 'clip_pos_embed')
+        if hasattr(self, 'clap_pos_embed'):
+            delattr(self, 'clap_pos_embed')
+        if hasattr(self, 'return_index'):
+            delattr(self, 'return_index')
+        
+        # Add classification heads
+        self.num_classes = num_classes
         self.head_drop = nn.Dropout(fc_drop_rate) if fc_drop_rate > 0 else nn.Identity()
-        self.head_v = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
-        self.head_a = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+        self.head_v = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        self.head_a = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        
+        # Initialize classification heads
+        if isinstance(self.head_v, nn.Linear):
+            trunc_normal_(self.head_v.weight, std=.02)
+            nn.init.constant_(self.head_v.bias, 0)
+        if isinstance(self.head_a, nn.Linear):
+            trunc_normal_(self.head_a.weight, std=.02)
+            nn.init.constant_(self.head_a.bias, 0)        
 
-    def forward():
-        return
+    def forward_features(self, x_v: Tensor, x_a: Tensor) -> Tensor:
+        """
+        Forward pass for feature extraction (no masking for fine-tuning).
+        
+        Args:
+            x_v (Tensor): Video input of shape [B, C, T, H, W].
+            x_a (Tensor): Audio input of shape [B, num_bins, T].
+        
+        Returns:
+            Tensor: Combined features of shape [B, N_total, D].
+        """
+        B, C, T, H, W = x_v.shape
+
+        # Patch embedding - reuse parent class logic
+        x_v = self.patch_embed_v(x_v)       # B, C_o, T_o, H_o, W_o
+        B, C, T, H, W = x_v.shape
+        x_v = x_v.permute(0, 2, 3, 4, 1).reshape(B * T, H * W, C)
+
+        x_a = x_a.unsqueeze(1)              # B, 1, num_bins, T
+        x_a = x_a.transpose(2, 3)           # B, 1, T, num_bins
+        x_a = self.patch_embed_a(x_a)       # B, N_a, d_a
+        B, N_a, d_a = x_a.shape
+        x_a = x_a.reshape(B*T, -1, d_a)     # B*T, N_a // T, d_a
+    
+        # Add position embedding
+        pos_embed_v = self.pos_embed_v.expand(B*T, -1, -1)
+        pos_embed_a = self.pos_embed_a.expand(B*T, -1, -1)
+        x_v = x_v + pos_embed_v
+        x_a = x_a + pos_embed_a
+        # Add temporal position embedding
+        x_v = x_v.reshape(B, T, -1, x_v.shape[-1])
+        B, T, N_v, D = x_v.shape
+        temporal_pos_embed_v = self.temporal_pos_embed_v.unsqueeze(-2).expand(B, -1, N_v, -1)
+        x_v = x_v + temporal_pos_embed_v
+        x_a = x_a.reshape(B, T, -1, x_a.shape[-1])
+        B, T, N_a, D = x_a.shape
+        temporal_pos_embed_a = self.temporal_pos_embed_a.unsqueeze(-2).expand(B, -1, N_a, -1)
+        x_a = x_a + temporal_pos_embed_a
+        x_v = x_v.reshape(B*T, N_v, D)       # B*T, N_v, d
+        x_a = x_a.reshape(B*T, N_a, d_a)     # B*T, N_a, d_a
+
+        # Add cls token
+        cls_tokens_v = self.cls_token_v.expand(B*T, -1, -1)
+        cls_tokens_a = self.cls_token_a.expand(B*T, -1, -1)
+        x_v = torch.cat((cls_tokens_v, x_v), dim=1)  # B*T, N_v+1, d
+        x_a = torch.cat((cls_tokens_a, x_a), dim=1)  # B*T, N_a+1, d_a
+
+        # Add Global token (if not using global pooling)
+        if not self.use_global_pooling:
+            global_token_v = self.global_token_v.expand(B*T, -1, -1)
+            global_token_a = self.global_token_a.expand(B*T, -1, -1)
+            x_v = torch.cat((x_v, global_token_v), dim=1)   # add global token at tail
+            x_a = torch.cat((x_a, global_token_a), dim=1)
+
+        x_v, x_a = x_v.reshape(B, T, -1, D), x_a.reshape(B, T, -1, d_a)  # B, T, N+1, d
+        
+        # Concatenate video and audio features (no masking for fine-tuning)
+        x = torch.cat((x_v, x_a), dim=2)  # B, T, N_v+N_a+special_tokens, d
+        B, T, N_total, D = x.shape
+        x = x.reshape(B, -1, D)  # B, T*N_total, d
+
+        # Mamba layers
+        residual = None
+        hidden_states = x
+        for idx, layer in enumerate(self.layers):
+            hidden_states, residual = layer(
+                hidden_states, residual, inference_params=None
+            )
+
+        # Final normalization
+        if not self.fused_add_norm:
+            if residual is None:
+                residual = hidden_states
+            else:
+                residual = residual + self.drop_path(hidden_states)
+            hidden_states = self.norm(residual.to(dtype=self.norm.weight.dtype))
+        else:
+            # Set prenorm=False here since we don't need the residual
+            fused_add_norm_fn = rms_norm_fn if isinstance(self.norm, RMSNorm) else layer_norm_fn
+            hidden_states = fused_add_norm_fn(
+                self.drop_path(hidden_states),
+                self.norm.weight,
+                self.norm.bias,
+                eps=self.norm.eps,
+                residual=residual,
+                prenorm=False,
+                residual_in_fp32=self.residual_in_fp32,
+            )
+
+        return hidden_states  # B, T*N_total, D
+
+    def forward(self, x_v: Tensor, x_a: Tensor) -> dict:
+        """
+        Full forward pass with classification outputs.
+        
+        Args:
+            x_v (Tensor): Video input of shape [B, C, T, H, W].
+            x_a (Tensor): Audio input of shape [B, num_bins, T].
+        
+        Returns:
+            dict: Dictionary containing classification logits for video and audio.
+        """
+        features = self.forward_features(x_v, x_a)  # B, T*N_total, D
+        B, _, D = features.shape
+        T = self.num_frames
+        
+        # Reshape to separate temporal and spatial dimensions
+        features = features.reshape(B, T, -1, D)  # B, T, N_total, D
+        
+        # Extract CLS tokens for each modality
+        if self.use_global_pooling:
+            # If using global pooling, apply pooling to get global representations
+            # We need to extract video and audio patches separately
+            N_v = self.num_patches_v + 1  # +1 for cls token
+            N_a = self.num_patches_a + 1  # +1 for cls token
+            
+            video_features = features[:, :, :N_v, :]  # B, T, N_v+1, D
+            audio_features = features[:, :, N_v:N_v+N_a, :]  # B, T, N_a+1, D
+            
+            # Apply global pooling
+            video_features = video_features.reshape(B*T, N_v, D)
+            audio_features = audio_features.reshape(B*T, N_a, D)
+            
+            cls_v = self.global_pooling_head_v(video_features)  # B*T, D
+            cls_a = self.global_pooling_head_a(audio_features)  # B*T, D
+            
+            cls_v = cls_v.reshape(B, T, D).mean(dim=1)  # B, D - average over time
+            cls_a = cls_a.reshape(B, T, D).mean(dim=1)  # B, D - average over time
+        else:
+            # Use global tokens (last tokens for each modality)
+            N_v = self.num_patches_v + 2  # +1 for cls, +1 for global
+            global_v = features[:, :, N_v-1, :]  # B, T, D (global video token)
+            global_a = features[:, :, -1, :]     # B, T, D (global audio token)
+            
+            # Average global tokens over time
+            cls_v = global_v.mean(dim=1)  # B, D
+            cls_a = global_a.mean(dim=1)  # B, D
+        
+        # Apply dropout and classification heads
+        cls_v = self.head_drop(cls_v)
+        cls_a = self.head_drop(cls_a)
+        
+        logits_v = self.head_v(cls_v)  # B, num_classes
+        logits_a = self.head_a(cls_a)  # B, num_classes
+        
+        return {
+            'logits_v': logits_v,
+            'logits_a': logits_a,
+            'features_v': cls_v,
+            'features_a': cls_a
+        }
 
 if __name__ == '__main__':
     # Test Script, run in the root directory of the project
     import warnings
 
     warnings.filterwarnings("ignore", category=FutureWarning)
-    from models.mamba_pretrain import CrossMamba
+    from models.mamba_pretrain import CrossMamba, CrossMambaFT
 
-    model = CrossMamba()
-    print("MambaPretrain model created successfully.")
-    print(model.patch_embed_v.num_patches, model.patch_embed_a.num_patches)
+    # Test CrossMamba (for pre-training)
+    print("=" * 50)
+    print("Testing CrossMamba (Pre-training)")
+    print("=" * 50)
+    model_pretrain = CrossMamba()
+    print("CrossMamba model created successfully.")
+    print(f"Video patches: {model_pretrain.patch_embed_v.num_patches}")
+    print(f"Audio patches: {model_pretrain.patch_embed_a.num_patches}")
+
+    # Test CrossMambaFT (for fine-tuning)
+    print("\n" + "=" * 50)
+    print("Testing CrossMambaFT (Fine-tuning)")
+    print("=" * 50)
+    model_ft = CrossMambaFT(num_classes=700, fc_drop_rate=0.1)
+    print("CrossMambaFT model created successfully.")
+    print(f"Number of classes: {model_ft.num_classes}")
+    print(f"Video head: {model_ft.head_v}")
+    print(f"Audio head: {model_ft.head_a}")
 
     import torch
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Test inputs
     v = torch.randn(1, 3, 10, 224, 224)  # Video input
-    a = torch.randn(1, 128, 960)
+    a = torch.randn(1, 128, 960)         # Audio input
+    
+    # Test mask for pre-training
     ones = torch.ones(1, 10)
     mask = torch.cat([
         ones,
@@ -549,13 +656,40 @@ if __name__ == '__main__':
         torch.zeros(1, 10 * int(14 * 14 * 0.25)),
         ones,
         ones,     
-        torch.ones(1, 10 * int(6 * 8 * 0.75)),      # # 6 = 960 / 10 / 16(10 = num_frames, 16 = patch_size)
+        torch.ones(1, 10 * int(6 * 8 * 0.75)),      # 6 = 960 / 10 / 16
         torch.zeros(1, 10 * int(6 * 8 * 0.25)),
         ones, 
     ], dim=-1).to(torch.bool)
-      # Add ones at the beginning and end
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
+
+    # Move to device
+    model_pretrain = model_pretrain.to(device)
+    model_ft = model_ft.to(device)
     v = v.to(device)
     a = a.to(device)
     mask = mask.to(device)
+
+    # Test pre-training model
+    print("\nTesting pre-training forward pass...")
+    try:
+        with torch.no_grad():
+            x_clip, x_clap, global_v, global_a = model_pretrain(v, a, mask)
+            print(f"CLIP output shape: {x_clip.shape}")
+            print(f"CLAP output shape: {x_clap.shape}")
+            print(f"Global video shape: {global_v.shape}")
+            print(f"Global audio shape: {global_a.shape}")
+    except Exception as e:
+        print(f"Pre-training forward pass failed: {e}")
+
+    # Test fine-tuning model
+    print("\nTesting fine-tuning forward pass...")
+    try:
+        with torch.no_grad():
+            outputs = model_ft(v, a)
+            print(f"Video logits shape: {outputs['logits_v'].shape}")
+            print(f"Audio logits shape: {outputs['logits_a'].shape}")
+            print(f"Video features shape: {outputs['features_v'].shape}")
+            print(f"Audio features shape: {outputs['features_a'].shape}")
+    except Exception as e:
+        print(f"Fine-tuning forward pass failed: {e}")
+
+    print("\nAll tests completed!")
