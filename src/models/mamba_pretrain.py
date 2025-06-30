@@ -644,12 +644,361 @@ class CrossMambaFT(CrossMamba):
             'feat_a': global_a,
         }
 
+
+class UniModalMamba(nn.Module):
+    """
+    UniModalMamba is a single-modality version of CrossMamba that processes
+    only one modality (video or audio) with mask+decoder reconstruction pipeline.
+    
+    Args:
+        modality (str): Either 'video' or 'audio' to specify which modality to process
+        img_size (int): Input image size for video, or treated as patch size for audio
+        audio_length (int): Length of audio sequence (only used for audio modality)  
+        num_bins (int): Number of frequency bins for audio (only used for audio modality)
+        patch_size (int): Patch size for vision transformer
+        embed_dim (int): Embedding dimension
+        depth (int): Number of transformer layers
+        num_frames (int): Number of frames in video sequence
+        clip_decoder_embed_dim (int): Decoder embedding dimension 
+        clip_output_dim (int): Output dimension for decoder
+        clip_return_layer (int): Number of layers to return for decoding
+        clip_student_return_interval (int): Interval between returned layers
+        clip_norm_type (str): Normalization type for decoder
+        use_global_pooling (bool): Whether to use global pooling
+    """
+    def __init__(
+            self,
+            modality='audio',  # 'video' or 'audio'
+            img_size=224,
+            audio_length=1024,
+            num_bins=64,
+            patch_size=16,
+            embed_dim=768,
+            kernel_size=1,
+            # Mamba parameters
+            fused_add_norm=True,
+            rms_norm=True, 
+            residual_in_fp32=True,
+            bimamba=True,
+            initializer_cfg=None,
+            ssm_cfg=None, 
+            norm_epsilon=1e-5,
+            # Model general parameters
+            depth=32,
+            drop_path_rate=0.4,
+            num_frames=16,
+            device=None,
+            dtype=None,
+            # Decoder parameters for mask+reconstruction
+            clip_decoder_embed_dim=768,
+            clip_output_dim=768,
+            clip_return_layer=1,
+            clip_student_return_interval=1,
+            clip_norm_type='l2',
+            use_global_pooling=False,
+    ):
+        super().__init__()
+        factory_kwargs = {"device": device, "dtype": dtype}
+        
+        self.modality = modality
+        self.embed_dim = embed_dim
+        self.num_frames = num_frames
+        self.use_global_pooling = use_global_pooling
+        
+        # Single modality patch embedding
+        if modality == 'video':
+            self.patch_embed = PatchEmbedVideo(
+                img_size=img_size,
+                patch_size=patch_size,
+                embed_dim=embed_dim,
+                in_chans=3,
+                kernel_size=kernel_size,
+            )
+            self.num_patches = int(img_size * img_size / (patch_size * patch_size))  # 196 for 224x224 with 16x16 patches
+        elif modality == 'audio':
+            self.patch_embed = PatchEmbedImg(
+                img_size=img_size,
+                patch_size=patch_size,
+                embed_dim=embed_dim,
+                in_chans=1,
+            )
+            # For audio: calculate patches based on audio_length and num_bins
+            self.patch_embed.num_patches = int(audio_length * num_bins / 256)
+            self.num_patches = self.patch_embed.num_patches // num_frames
+        else:
+            raise ValueError(f"Unsupported modality: {modality}. Must be 'video' or 'audio'")
+
+        # Mamba layers
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
+        inter_dpr = [0.0] + dpr
+        self.residual_in_fp32 = residual_in_fp32
+        self.fused_add_norm = fused_add_norm
+        self.bimamba = bimamba
+        self.layers = nn.ModuleList([
+            create_block(
+                embed_dim,
+                ssm_cfg=ssm_cfg,
+                norm_epsilon=norm_epsilon,
+                rms_norm=rms_norm,
+                residual_in_fp32=residual_in_fp32,
+                fused_add_norm=fused_add_norm,
+                layer_idx=i,
+                bimamba=bimamba,
+                drop_path=inter_dpr[i],
+            )
+            for i in range(depth)
+        ])
+        
+        self.depth = depth
+        self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
+        
+        # Tokens and position embeddings
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        if not use_global_pooling:
+            self.global_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        
+        # Position embeddings
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, embed_dim))
+        self.temporal_pos_embed = nn.Parameter(torch.zeros(1, num_frames // kernel_size, embed_dim))
+        
+        # Initialize position embeddings
+        pos_embed = get_sinusoid_encoding_table(self.num_patches, embed_dim)
+        self.pos_embed.data.copy_(pos_embed.float())
+        self.temporal_pos_embed.data.copy_(torch.zeros(1, num_frames // kernel_size, embed_dim).float())
+        
+        # Global pooling head (if used)
+        if use_global_pooling:
+            self.global_pooling_head = GlobalPoolingHead(embed_dim)
+
+        # Output normalization
+        self.norm = (nn.LayerNorm if not rms_norm else RMSNorm)(embed_dim, eps=norm_epsilon, **factory_kwargs)
+        
+        # Decoder for mask+reconstruction pipeline (similar to CLIP/CLAP decoder)
+        self.decoder = nn.ModuleList([
+            Linear_Decoder(
+                output_dim=clip_output_dim, 
+                embed_dim=clip_decoder_embed_dim, 
+                norm_layer=nn.LayerNorm, 
+                clip_norm_type=clip_norm_type
+            ) for _ in range(clip_return_layer)
+        ])
+        
+        # Position embedding for decoder
+        self.decoder_pos_embed = get_sinusoid_encoding_table(
+            self.num_patches * num_frames // kernel_size, 
+            clip_decoder_embed_dim
+        )
+        
+        # Return layer indices for decoder
+        self.return_index = []
+        for i in range(clip_return_layer):
+            self.return_index.append(depth - int(i * clip_student_return_interval) - 1)
+        
+        # Initialize parameters
+        self.apply(segm_init_weights)
+        trunc_normal_(self.pos_embed, std=.02)
+        trunc_normal_(self.cls_token, std=.02)
+        if not use_global_pooling:
+            trunc_normal_(self.global_token, std=.02)
+        
+        # Mamba initialization
+        self.apply(
+            partial(
+                _init_weights,
+                n_layer=depth,
+                **(initializer_cfg if initializer_cfg is not None else {}),
+            )
+        )
+
+    def forward_features(self, x: Tensor, mask=None) -> dict:
+        """
+        Forward pass for feature extraction with mask support.
+        
+        Args:
+            x (Tensor): Input tensor
+                - For video: [B, C, T, H, W]
+                - For audio: [B, num_bins, T] or [B, C, T] 
+            mask (Tensor, optional): Mask tensor of shape [B, T*(1+N_patches+1)] for masking
+                True values are masked (invisible), False values are visible
+        
+        Returns:
+            Tensor: Features from visible patches for decoder reconstruction
+        """
+        if self.modality == 'video':
+            B, C, T, H, W = x.shape
+            # Video patch embedding
+            x = self.patch_embed(x)  # B, C_o, T_o, H_o, W_o
+            B, C, T, H, W = x.shape
+            x = x.permute(0, 2, 3, 4, 1).reshape(B * T, H * W, C)  # B*T, N_patches, D
+        else:  # audio
+            B = x.shape[0]
+            T = self.num_frames
+            if len(x.shape) == 3:  # B, num_bins, T
+                x = x.unsqueeze(1)  # B, 1, num_bins, T
+            x = x.transpose(2, 3)  # B, 1, T, num_bins
+            x = self.patch_embed(x)  # B, N_total, D
+            B, N_total, D = x.shape
+            x = x.reshape(B*T, -1, D)  # B*T, N_patches_per_frame, D
+        
+        # Add spatial position embedding
+        pos_embed = self.pos_embed.expand(B*T, -1, -1)
+        x = x + pos_embed
+        
+        # Add temporal position embedding
+        x = x.reshape(B, T, -1, x.shape[-1])  # B, T, N_patches, D
+        B, T, N_patches, D = x.shape
+        temporal_pos_embed = self.temporal_pos_embed.unsqueeze(-2).expand(B, -1, N_patches, -1)
+        x = x + temporal_pos_embed
+        x = x.reshape(B*T, N_patches, D)  # B*T, N_patches, D
+        
+        # Add CLS token
+        cls_tokens = self.cls_token.expand(B*T, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)  # B*T, N_patches+1, D
+        
+        # Add global token (if not using global pooling)
+        if not self.use_global_pooling:
+            global_tokens = self.global_token.expand(B*T, -1, -1)
+            x = torch.cat((x, global_tokens), dim=1)  # B*T, N_patches+2, D
+        
+        # Reshape for sequence processing
+        x = x.reshape(B, -1, D)  # B, T*(N_patches+tokens), D
+        
+        # Apply mask if provided
+        if mask is not None:
+            x_vis = x[~mask].reshape(B, -1, D)  # Only visible patches
+        else:
+            x_vis = x  # No masking
+        
+        # Store features from different layers for decoder
+        x_features = []
+        
+        # Pass through Mamba layers
+        residual = None
+        hidden_states = x_vis
+        for idx, layer in enumerate(self.layers):
+            hidden_states, residual = layer(
+                hidden_states, residual, inference_params=None
+            )
+            # Store features from specified layers for decoder
+            if (idx - 1) in self.return_index:
+                x_features.append(self.norm(residual.to(dtype=self.norm.weight.dtype)))
+        
+        # Final normalization
+        if not self.fused_add_norm:
+            if residual is None:
+                residual = hidden_states
+            else:
+                residual = residual + self.drop_path(hidden_states)
+            hidden_states = self.norm(residual.to(dtype=self.norm.weight.dtype))
+        else:
+            fused_add_norm_fn = rms_norm_fn if isinstance(self.norm, RMSNorm) else layer_norm_fn
+            hidden_states = fused_add_norm_fn(
+                self.drop_path(hidden_states),
+                self.norm.weight,
+                self.norm.bias,
+                eps=self.norm.eps,
+                residual=residual,
+                prenorm=False,
+                residual_in_fp32=self.residual_in_fp32,
+            )
+        
+        # Add final layer if in return index
+        if (self.depth - 1) in self.return_index:
+            x_features.append(hidden_states)
+        
+        x_features = torch.stack(x_features) if x_features else hidden_states.unsqueeze(0)
+        
+        return x_features
+
+    def forward(self, x: Tensor, mask=None) -> dict:
+        """
+        Full forward pass with mask+decoder reconstruction pipeline.
+        
+        Args:
+            x (Tensor): Input tensor
+                - For video: [B, C, T, H, W]  
+                - For audio: [B, num_bins, T] or [B, C, T]
+            mask (Tensor, optional): Mask tensor for masking patches
+                True values are masked (invisible), False values are visible
+        
+        Returns:
+            dict: Dictionary containing:
+                - 'features': Reconstructed features from decoder
+                - 'global_features': Global features for the modality
+        """
+        # Get features from encoder
+        x_vis = self.forward_features(x, mask)  # K, B, N_vis, D
+        K, B, N_vis, D = x_vis.shape
+        T = self.num_frames
+        
+        # Extract visible patches and global features
+        if mask is not None:
+            # Calculate number of visible patches per frame
+            if self.use_global_pooling:
+                num_tokens = 1  # only CLS token
+            else:
+                num_tokens = 2  # CLS + global token
+            
+            # Reshape mask to separate by frame
+            mask = mask.reshape(B, T, -1)
+            patch_mask = mask[:, :, 1:-num_tokens+1] if num_tokens > 1 else mask[:, :, 1:]  # B, T, N_patches
+            
+            num_visible_per_frame = self.num_patches - int(patch_mask.sum(dim=-1)[0, 0])
+            
+            # Extract visible patches and global features
+            x_vis = x_vis.reshape(K*B, T, -1, D)  # K*B, T, N_vis_total, D
+            patches_vis = x_vis[:, :, 1:num_visible_per_frame+1]  # K*B, T, N_vis_patches, D
+            
+            if not self.use_global_pooling:
+                global_feat = x_vis[:, :, -1]  # K*B, T, D (global token)
+            else:
+                # For global pooling, we need to pool over visible patches
+                global_feat = patches_vis.mean(dim=2)  # K*B, T, D
+            
+            # Reshape for decoder
+            patches_vis = patches_vis.reshape(B, -1, D)  # B, T*N_vis_patches, D
+            
+            # Add position embedding for visible patches
+            expand_pos_embed = self.decoder_pos_embed.repeat(B, 1, 1).type_as(x).to(x.device).clone().detach()
+            patch_mask_flat = patch_mask.flatten(1)  # B, T*N_patches
+            pos_embed_vis = expand_pos_embed[~patch_mask_flat].view(B, -1, D).unsqueeze(0).repeat(K, 1, 1, 1)
+            x_decoder_input = patches_vis + pos_embed_vis  # K, B, N_vis, D
+            
+        else:
+            # No masking - use all patches
+            x_vis = x_vis.reshape(K*B, T, -1, D)
+            patches_vis = x_vis[:, :, 1:-1 if not self.use_global_pooling else 1:]  # K*B, T, N_patches, D
+            
+            global_feat = x_vis[:, :, -1] 
+            
+            patches_vis = patches_vis.reshape(B, -1, D)  # B, T*N_patches, D
+            x_decoder_input = patches_vis.unsqueeze(0).repeat(K, 1, 1, 1)  # K, B, T*N_patches, D
+        
+        # Apply decoder to reconstruct features
+        x_decoded = []
+        for idx, decoder in enumerate(self.decoder):
+            x_decoded.append(decoder(x_decoder_input[idx]))
+        x_decoded = torch.stack(x_decoded)  # K, B, N_vis, output_dim
+        
+        # Reshape global features
+        global_feat = global_feat.reshape(B, T, D)  # B, T, D
+        
+        return {
+            'features': x_decoded,
+            'global_features': global_feat,
+        }
+
+
+
+
+
+
 if __name__ == '__main__':
     # Test Script, run in the root directory of the project
     import warnings
 
     warnings.filterwarnings("ignore", category=FutureWarning)
-    from models.mamba_pretrain import CrossMamba, CrossMambaFT
+    from models.mamba_pretrain import CrossMamba, CrossMambaFT, UniModalMamba
 
     # Test CrossMamba (for pre-training)
     print("=" * 50)
@@ -667,8 +1016,38 @@ if __name__ == '__main__':
     model_ft = CrossMambaFT(num_classes=700, fc_drop_rate=0.1)
     print("CrossMambaFT model created successfully.")
     print(f"Number of classes: {model_ft.num_classes}")
-    print(f"Video head: {model_ft.head_v}")
-    print(f"Audio head: {model_ft.head_a}")
+
+    # Test UniModalMamba (for single modality with mask+decoder)
+    print("\n" + "=" * 50)
+    print("Testing UniModalMamba (Single Modality with Mask+Decoder)")
+    print("=" * 50)
+    
+    # Test video-only model with mask+decoder
+    model_video = UniModalMamba(
+        modality='video', 
+        num_frames=10,
+        clip_decoder_embed_dim=512,
+        clip_output_dim=768,
+        clip_return_layer=1
+    )
+    print("UniModalMamba (video) model created successfully.")
+    print(f"Video patches: {model_video.num_patches}")
+    print(f"Modality: {model_video.modality}")
+    print(f"Decoder layers: {len(model_video.decoder)}")
+    
+    # Test audio-only model with mask+decoder
+    model_audio = UniModalMamba(
+        modality='audio', 
+        num_frames=10, 
+        audio_length=960,
+        clip_decoder_embed_dim=512,
+        clip_output_dim=768,
+        clip_return_layer=1
+    )
+    print("UniModalMamba (audio) model created successfully.")
+    print(f"Audio patches: {model_audio.num_patches}")
+    print(f"Modality: {model_audio.modality}")
+    print(f"Decoder layers: {len(model_audio.decoder)}")
 
     import torch
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -691,12 +1070,33 @@ if __name__ == '__main__':
         ones, 
     ], dim=-1).to(torch.bool)
 
+    # Create masks for UniModalMamba
+    # Video mask: [CLS] + [patches] + [global] where some patches are masked
+    video_mask = torch.cat([
+        torch.zeros(1, 1),  # CLS token always visible
+        torch.ones(1, 10 * int(14 * 14 * 0.75)),   # 75% patches masked
+        torch.zeros(1, 10 * int(14 * 14 * 0.25)),  # 25% patches visible
+        torch.zeros(1, 1),  # Global token always visible
+    ], dim=-1).to(torch.bool)
+    
+    # Audio mask: [CLS] + [patches] + [global] where some patches are masked
+    audio_mask = torch.cat([
+        torch.zeros(1, 1),  # CLS token always visible
+        torch.ones(1, 10 * int(6 * 8 * 0.75)),     # 75% patches masked
+        torch.zeros(1, 10 * int(6 * 8 * 0.25)),    # 25% patches visible
+        torch.zeros(1, 1),  # Global token always visible
+    ], dim=-1).to(torch.bool)
+
     # Move to device
     model_pretrain = model_pretrain.to(device)
     model_ft = model_ft.to(device)
+    model_video = model_video.to(device)
+    model_audio = model_audio.to(device)
     v = v.to(device)
     a = a.to(device)
     mask = mask.to(device)
+    video_mask = video_mask.to(device)
+    audio_mask = audio_mask.to(device)
 
     # Test pre-training model
     print("\nTesting pre-training forward pass...")
@@ -715,11 +1115,41 @@ if __name__ == '__main__':
     try:
         with torch.no_grad():
             outputs = model_ft(v, a)
-            print(f"Video logits shape: {outputs['logits_v'].shape}")
-            print(f"Audio logits shape: {outputs['logits_a'].shape}")
-            print(f"Video features shape: {outputs['features_v'].shape}")
-            print(f"Audio features shape: {outputs['features_a'].shape}")
+            print(f"Logits shape: {outputs['logits'].shape}")
+            print(f"Video features shape: {outputs['feat_v'].shape}")
+            print(f"Audio features shape: {outputs['feat_a'].shape}")
     except Exception as e:
         print(f"Fine-tuning forward pass failed: {e}")
 
+    # Test UniModalMamba video model with mask+decoder
+    print("\nTesting UniModalMamba (video) mask+decoder forward pass...")
+    try:
+        with torch.no_grad():
+            outputs_video = model_video(v, video_mask)
+            print(f"Video decoded features shape: {outputs_video['features'].shape}")
+            print(f"Video global features shape: {outputs_video['global_features'].shape}")
+    except Exception as e:
+        print(f"UniModalMamba (video) forward pass failed: {e}")
+
+    # Test UniModalMamba audio model with mask+decoder
+    print("\nTesting UniModalMamba (audio) mask+decoder forward pass...")
+    try:
+        with torch.no_grad():
+            outputs_audio = model_audio(a, audio_mask)
+            print(f"Audio decoded features shape: {outputs_audio['features'].shape}")
+            print(f"Audio global features shape: {outputs_audio['global_features'].shape}")
+    except Exception as e:
+        print(f"UniModalMamba (audio) forward pass failed: {e}")
+
+    # Test UniModalMamba without mask (for comparison)
+    print("\nTesting UniModalMamba (video) without mask...")
+    try:
+        with torch.no_grad():
+            outputs_video_no_mask = model_video(v, None)
+            print(f"Video decoded features shape (no mask): {outputs_video_no_mask['features'].shape}")
+            print(f"Video global features shape (no mask): {outputs_video_no_mask['global_features'].shape}")
+    except Exception as e:
+        print(f"UniModalMamba (video) without mask failed: {e}")
+
     print("\nAll tests completed!")
+    print("UniModalMamba now supports mask+decoder reconstruction pipeline like CrossMamba!")

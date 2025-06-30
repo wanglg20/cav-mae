@@ -3,7 +3,7 @@ import warnings
 import torch
 
 warnings.filterwarnings("ignore", category=FutureWarning)
-from models.mamba_pretrain import CrossMamba, CrossMambaFT
+from models.mamba_pretrain import CrossMamba, CrossMambaFT, UniModalMamba
 from models.videomamba_pretrain import VisionMamba
 from models.teacher import clip_b16
 from dataloader import rand_mask_generate, mask_expand2d
@@ -104,6 +104,7 @@ def test_clap_teacher():
 # def test_clap_teacher():
     
 
+
 def test_cross_mamba_ft():
     # Test CrossMambaFT (for fine-tuning)
     print("\n" + "=" * 50)
@@ -154,8 +155,61 @@ def test_cross_mamba_ft():
         print(f"Fine-tuning forward pass failed: {e}")
 
 
+def test_unimodal_mamba(modality = 'audio'):
+    print("\n" + "=" * 50)
+    print("Testing uni-modality mamba, current modality is: {}".format(modality))
+    print("=" * 50)
+    model = UniModalMamba()
+    device = torch.device("cuda")
+    B = 2  
+    # Test inputs
+    v = torch.randn(B, 3, 16, 224, 224)  # Video input
+    a = torch.randn(B, 64, 1024)         # Audio input
+    
+    # Test mask for pre-training
+    ones = torch.ones(1, 16, 1).bool()
+    zeros = torch.zeros(1, 16, 1).bool()
+    mask_v = rand_mask_generate(16, 196, 0.75)
+    mask_a = rand_mask_generate(16, 4, 0.75)
+    mask_a_ori = mask_a.reshape(16, 2, 2)
+    mask_a = mask_expand2d(mask_a_ori, expand_ratio = 2)    # 16, 4, 4
+    mask_a = mask_a.reshape(16, -1)
+    mask_v = mask_v.unsqueeze(0)
+    mask_a = mask_a.unsqueeze(0)
+    if modality == 'video':
+        mask_v = torch.cat([
+            zeros,
+            mask_v,
+            zeros
+        ], dim=-1)
+        input_mask = mask_v
+        input_x = v
+    else:
+        mask_a = torch.cat([
+            zeros,
+            mask_a, 
+            zeros
+        ], dim=-1)
+        input_mask = mask_a
+        input_x = a
+
+    model = model.to(device)
+    input_x = input_x.to(device)
+    input_mask = input_mask.to(device)
+    input_mask = input_mask.reshape(1, -1)
+    input_mask = input_mask.repeat(B, 1)
+    # Test forward pass of Unimodal Mamba Model:
+    print(f"input shape: {input_x.shape}, input mask shape: {input_mask.shape}")
+    outputs = model(input_x, input_mask)
+    print(f"Output Feats:", outputs['global_features'].shape)
+    print(f"Output Recosn Feats:", outputs['features'].shape)
+
+    print(f"modality {modality} forward pass successful!")
+
+
 if __name__ == "__main__":
     # test_clip_teacher()
     # test_cross_mamba()
     # test_clap_teacher()
-    test_cross_mamba_ft()
+    # test_cross_mamba_ft()
+    test_unimodal_mamba(modality = 'audio')

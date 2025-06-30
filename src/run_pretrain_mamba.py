@@ -14,11 +14,11 @@ sys.path.append(basepath)
 import dataloader as dataloader
 import models
 from models.videomamba_pretrain import VisionMamba
-from models.mamba_pretrain import CrossMamba
+from models.mamba_pretrain import CrossMamba, UniModalMamba
 from models.videomamba_pretrain import VisionMamba
 from transformers import ClapModel, ClapProcessor
 import numpy as np
-from engine_mamba_training import train_mamba
+from engine_mamba_training import train_mamba, train_uni_mamba
 
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -105,6 +105,7 @@ parser.add_argument("--mask_ratio", type=float, default=0.75, help="masking rati
 parser.add_argument("--train_frame_root", type=str, default='/data/wanglinge/project/cav-mae/src/data/k700/train_16f', help="the root directory for training video frames")
 parser.add_argument("--val_frame_root", type=str, default='/data/wanglinge/project/cav-mae/src/data/k700/val_16f', help="the root directory for validation video frames")
 parser.add_argument("--clap_path", type=str, default='/data/wanglinge/project/cav-mae/src/weight/teacher/clap.pth', help="the path to the pre-trained clap model")
+parser.add_argument("--modality", type=str, default='both', help="the modality used for training", choices=["video", "audio", "both"])
 
 args = parser.parse_args()
 im_res = 224
@@ -146,11 +147,17 @@ if args.use_wandb and local_rank == 0:
         if args.wandb_run_name != None:
             wandb.run.name = args.wandb_run_name
         wandb.config.update(args)
-
-model = CrossMamba(
+if args.modality == 'both':
+    model = CrossMamba(
         num_frames=16,
         audio_length=1024,
         )
+elif args.modality == 'audio':
+    model = UniModalMamba(modality='audio')
+elif args.modality == 'video':
+    model = UniModalMamba(modality='video')
+else:
+    raise ValueError("modality should be one of 'both', 'audio', 'video'")
 teacher_v = clip_b16(
       pretrained=True,
       clip_norm_type='l2',
@@ -171,19 +178,38 @@ n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print('number of params: {} M'.format(n_parameters / 1e6))
 
 # Dataset and Dataloader
-train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, 
-    audio_conf=audio_conf, modality='both', vision='video', raw='k700', num_frames=16,
-    use_mask=True, video_frame_dir=args.train_frame_root)
-sampler = DistributedSampler(train_set)
-train_loader = torch.utils.data.DataLoader(
-train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
-val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, num_frames=16,
-    audio_conf=val_audio_conf, modality='both', vision='video', raw='k700', 
-    use_mask=True, video_frame_dir=args.val_frame_root)
-val_sampler = DistributedSampler(val_set)
-val_loader = torch.utils.data.DataLoader(
-    val_set, batch_size=10, sampler = val_sampler, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+if args.modality == 'audio':
+    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, 
+        audio_conf=audio_conf, modality='audioonly', vision='video', raw='audioset', num_frames=16,
+        use_mask=True, video_frame_dir=args.train_frame_root)
+    sampler = DistributedSampler(train_set)
+    train_loader = torch.utils.data.DataLoader(
+    train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+    val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, num_frames=16,
+        audio_conf=val_audio_conf, modality='audioonly', vision='video', raw='audioset', 
+        use_mask=True, video_frame_dir=args.val_frame_root)
+    val_sampler = DistributedSampler(val_set)
+    val_loader = torch.utils.data.DataLoader(
+        val_set, batch_size=10, sampler = val_sampler, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+else:
+    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, 
+        audio_conf=audio_conf, modality='both', vision='video', raw='k700', num_frames=16,
+        use_mask=True, video_frame_dir=args.train_frame_root)
+    sampler = DistributedSampler(train_set)
+    train_loader = torch.utils.data.DataLoader(
+    train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
+    val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, num_frames=16,
+        audio_conf=val_audio_conf, modality='both', vision='video', raw='k700', 
+        use_mask=True, video_frame_dir=args.val_frame_root)
+    val_sampler = DistributedSampler(val_set)
+    val_loader = torch.utils.data.DataLoader(
+        val_set, batch_size=10, sampler = val_sampler, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
 
 
 print('Now starting training for {:d} epochs.'.format(args.n_epochs))
-train_mamba(model, teacher_v, teacher_a, train_loader, val_loader, args, local_rank )
+if args.modality == 'both':
+    train_mamba(model, teacher_v, teacher_a, train_loader, val_loader, args, local_rank )
+elif args.modality == 'audio':
+    train_uni_mamba(model, teacher_a, train_loader, val_loader, args, local_rank)
+else:
+    raise ValueError("modality {} not implemented".format(args.modality))

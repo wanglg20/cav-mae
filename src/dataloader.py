@@ -273,7 +273,7 @@ class AudiosetDataset(Dataset):
             fbank = torchaudio.compliance.kaldi.fbank(waveform, htk_compat=True, sample_frequency=sr, use_energy=False, window_type='hanning', num_mel_bins=self.melbins, dither=0.0, frame_shift=10)
             
         except:
-            fbank = torch.zeros([512, 128]) + 0.01
+            fbank = torch.zeros([512, 64]) + 0.01
             print('there is a loading error')
         #print("fbank shape is ", fbank.shape)   #(1000, 128)
         target_length = self.target_length
@@ -348,7 +348,7 @@ class AudiosetDataset(Dataset):
             try:
                 fbank = self._wav2fbank(datum['wav'], mix_datum['wav'], mix_lambda)
             except:
-                fbank = torch.zeros([self.target_length, 128]) + 0.01
+                fbank = torch.zeros([self.target_length, 64]) + 0.01
                 print('there is an error in loading audio')
             if self.modality != 'audioonly':
                 try:
@@ -373,7 +373,7 @@ class AudiosetDataset(Dataset):
             try:
                 fbank = self._wav2fbank(datum['wav'], None, 0)
             except:
-                fbank = torch.zeros([self.target_length, 128]) + 0.01
+                fbank = torch.zeros([self.target_length, 64]) + 0.01
                 print('there is an error in loading audio')
 
             if self.modality == 'audioonly':
@@ -447,23 +447,42 @@ class AudiosetDataset(Dataset):
     
 if __name__ == '__main__':
     # test the dataloader
-    audio_conf = {'num_mel_bins': 64, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
-              'noise':True, 'label_smooth': 0, 'im_res': 224}
-    dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700/k700_train_valid.json', audio_conf, num_frames=16,
-                               label_csv='/data/wanglinge/project/cav-mae/src/data/info/k700/k700_class.csv',  modality='both', 
-                               raw='k700', vision='video', use_mask=True, video_frame_dir='/data/wanglinge/dataset/k700/frames_16')
-    print('dataset length is {:d}'.format(len(dataset)))
-    loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
-    loss = torch.nn.CrossEntropyLoss()
-    from traintest_ft import *
-    for i, (fbank, image, label_indices, mask, mask_v, mask_a) in enumerate(loader):
-        print(fbank.shape)      # B, 1024, 128
-        print(image.shape)      # B, 10, 3, 224, 224
-        print(label_indices.shape) # B, 700, torch.sum() = 1
-        print(mask.shape)
-        print(mask_v.shape)
-        print(mask_a.shape)    # B, 16, 4
-        print("present idx:", i, end='\r')
-        break
-        if i > 1000:
+    def test_k700_dataset():
+        audio_conf = {'num_mel_bins': 64, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
+                  'noise':True, 'label_smooth': 0, 'im_res': 224}
+        dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700/k700_train_valid.json', audio_conf, num_frames=16,
+                                   label_csv='/data/wanglinge/project/cav-mae/src/data/info/k700/k700_class.csv',  modality='both', 
+                                   raw='k700', vision='video', use_mask=True, video_frame_dir='/data/wanglinge/dataset/k700/frames_16')
+        print('dataset length is {:d}'.format(len(dataset)))
+        loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
+        for i, (fbank, image, label_indices, mask, mask_v, mask_a) in enumerate(loader):
+            print(fbank.shape)      # B, 1024, 128
+            print(image.shape)      # B, 10, 3, 224, 224
+            print(label_indices.shape) # B, 700, torch.sum() = 1
+            print(mask.shape)
+            print(mask_v.shape)
+            print(mask_a.shape)    # B, 16, 4
+            print("present idx:", i, end='\r')
             break
+            if i > 1000:
+                break
+    
+    def test_audioset_dataset():
+        audio_conf = {'num_mel_bins': 64, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
+                  'noise':True, 'label_smooth': 0, 'im_res': 224}
+        dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/as/data/unbalanced_train_segments_valid.json', audio_conf, num_frames=16,
+                                   label_csv='/data/wanglinge/project/cav-mae/src/data/info/as/data/as_label.csv',  modality='audioonly', 
+                                   raw='audioset', use_mask=True)
+        print('dataset length is {:d}'.format(len(dataset)))
+        loader = torch.utils.data.DataLoader(dataset, batch_size=10, shuffle=False, num_workers=0)
+        for i, (fbank, image, label_indices, mask, mask_v, mask_a) in enumerate(loader):
+            print(fbank.shape)      # B, 1024, 128
+            print(image.shape)      # B, 10, 3, 224, 224
+            print(label_indices.shape)
+            print(mask_a.shape)
+            print(mask.shape)
+            print("present idx:", i, end='\r')
+            if i > 1:
+                break
+    
+    test_audioset_dataset()
