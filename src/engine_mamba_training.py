@@ -118,13 +118,13 @@ def train_mamba(model, teacher_v, teacher_a, train_loader, test_loader, args, lo
     device = torch.device(f'cuda:{local_rank}')
     model = model.to(device)
     model.train()
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
     teacher_v = teacher_v.to(device)
     teacher_a = teacher_a.to(device)
     teacher_v.eval()
     teacher_a.eval()
-    teacher_v = DDP(teacher_v, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
-    teacher_a = DDP(teacher_a, device_ids=[local_rank], output_device= local_rank, find_unused_parameters=True)
+    teacher_v = DDP(teacher_v, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+    teacher_a = DDP(teacher_a, device_ids=[local_rank], output_device= local_rank, find_unused_parameters=False)
     
     torch.set_grad_enabled(True)
 
@@ -467,7 +467,7 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
     device = torch.device(f'cuda:{local_rank}')
     model = model.to(device)
     model.train()
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
 
     torch.set_grad_enabled(True)
     batch_time, per_sample_time, data_time, per_sample_data_time, loss_meter, per_sample_dnn_time = AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter()
@@ -478,17 +478,24 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
     exp_dir = args.exp_dir
     
     # Learning Rate Adjustment for linear-Probing
-    probe_param_list = [
-        k for k, v in model.named_parameters() if v.requires_grad and k.startswith('head')
+    probe_param_names = [
+        k for k, v in model.named_parameters() if v.requires_grad and k.startswith('module.head')
     ]
-    base_param_list = [
-        k for k, v in model.named_parameters() if v.requires_grad and not k.startswith('head')
+    print("Probe parameter names:", probe_param_names)
+    
+    base_param_names = [
+        k for k, v in model.named_parameters() if v.requires_grad and not k.startswith('module.head')
     ]
+    
+    # Create parameter lists by matching names to actual parameters
+    probe_params = [v for k, v in model.named_parameters() if v.requires_grad and k.startswith('module.head')]
+    base_params = [v for k, v in model.named_parameters() if v.requires_grad and not k.startswith('module.head')]
+    
+    
     print('Total parameter number is : {:.3f} M'.format(sum(p.numel() for p in model.parameters()) / 1e6))
-    print('Total trainable parameter number is : {:.3f} M'.format(sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6))
-    print('Probe parameter number is : {:.3f} M'.format(sum(p.numel() for p in model.parameters() if p.requires_grad and p in probe_param_list) / 1e6))
-    print('Base parameter number is : {:.3f} M'.format(sum(p.numel() for p in model.parameters() if p.requires_grad and p in base_param_list) / 1e6))
-    optimizer = torch.optim.Adam([{'params': base_param_list, 'lr': args.lr}, {'params': probe_param_list, 'lr': args.lr * args.head_lr}], weight_decay=5e-7, betas=(0.95, 0.999))
+    print('Probe parameter number is : {:.3f} M'.format(sum(p.numel() for p in probe_params) / 1e6))  
+    print('Base parameter number is : {:.3f} M'.format(sum(p.numel() for p in base_params) / 1e6))
+    optimizer = torch.optim.Adam([{'params':  base_params, 'lr': args.lr}, {'params': probe_params, 'lr': args.lr * args.head_lr}], weight_decay=5e-7, betas=(0.95, 0.999))
     base_lr = optimizer.param_groups[0]['lr']
     mlp_lr = optimizer.param_groups[1]['lr']
     print('base lr, mlp lr : ', base_lr, mlp_lr)
@@ -499,7 +506,7 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
     # only for preliminary test, formal exps should use fixed learning rate scheduler
     if args.lr_adapt == True:
         # Adaptive scheduler: good for exploration but less reproducible
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=args.lr_patience, verbose=True)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=args.lr_patience)
         print('Override to use adaptive learning rate scheduler.')
     else:
         # Fixed scheduler: better for reproducible final results
@@ -526,7 +533,7 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
 
     print("current #steps=%s, #epochs=%s" % (global_step, epoch))
     print("start training...")
-    args.n_print_steps = 10
+    args.n_print_steps = 500
     model.train()
     while epoch < args.n_epochs + 1:
         train_loader.sampler.set_epoch(epoch)
@@ -537,17 +544,19 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
         print('---------------')
         print(datetime.datetime.now())
         print("current #epochs=%s, #steps=%s" % (epoch, global_step))
-        for i, (a_input, v_input, labels) in enumerate(train_loader):
-            B = a_input.size(0)
+        for i, (a_input, v_input, labels, mask, mask_v, mask_a) in enumerate(train_loader):
+            B, T, C, H, W = v_input.shape
             a_input, v_input = a_input.to(device, non_blocking=True), v_input.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
+            a_input = a_input.permute(0, 2, 1)  # B, C, T
+            v_input = v_input.permute(0, 2, 1, 3, 4)
 
             data_time.update(time.time() - end_time)
             per_sample_data_time.update((time.time() - end_time) / a_input.shape[0])
             dnn_start_time = time.time()
 
             with autocast():
-                logits = model(v_input, a_input)
+                logits = model(v_input, a_input)['logits']  # logits shape: B, T, num_classes
                 loss = loss_fn(logits, labels)
             
             optimizer.zero_grad()
@@ -570,12 +579,13 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
             per_sample_time.update((time.time() - end_time)/a_input.shape[0])
             per_sample_dnn_time.update((time.time() - dnn_start_time)/a_input.shape[0])
 
+            args.n_print_steps = 1
             print_step = global_step % args.n_print_steps == 0
-            early_print_step = epoch == 0 and global_step % (args.n_print_steps/10) == 0
+            early_print_step = epoch == 0 and global_step % (args.n_print_steps) == 0
             print_step = print_step or early_print_step
 
             #print_step = True
-            if print_step and global_step != 0:
+            if print_step:
                 print('Epoch: [{0}][{1}/{2}]\t'
                   'Per Sample Total Time {per_sample_time.avg:.5f}\t'
                   'Per Sample Data Time {per_sample_data_time.avg:.5f}\t'
@@ -589,6 +599,7 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
 
             end_time = time.time()
             global_step += 1
+            
 
 
         print('start validation')
@@ -621,8 +632,6 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
             torch.save(model.state_dict(), "%s/models/best_model.pth" % (exp_dir))
             torch.save(optimizer.state_dict(), "%s/models/best_optim_state.pth" % (exp_dir))
         save_interval = 5
-        if args.use_video:
-            save_interval = 1
         if args.save_model == True and (epoch % save_interval == 0 or epoch == args.n_epochs):
             torch.save(model.state_dict(), "%s/models/model.%d.pth" % (exp_dir, epoch))
 
@@ -652,7 +661,7 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
 
 
 
-def validate_ft(model, val_loader, args, local_rank=0, return_ap=True):
+def validate_ft(model, val_loader, args, local_rank=0, output_pred=False, return_ap = False):
     device = torch.device(f'cuda:{local_rank}')
     batch_time = AverageMeter()
     model.eval()
@@ -660,12 +669,17 @@ def validate_ft(model, val_loader, args, local_rank=0, return_ap=True):
     end = time.time()
     A_predictions, A_targets, A_loss = [], [], []
     with torch.no_grad():
-        for i, (a_input, v_input, labels) in enumerate(val_loader):
-            a_input = a_input.to(device)
-            v_input = v_input.to(device)
+        for i, (a_input, v_input, labels, mask, mask_v, mask_a) in enumerate(val_loader):
+            if i > 10:      # only validate the first 10 batches for testing
+                break
+            B, T, C, H, W = v_input.shape
+            a_input, v_input = a_input.to(device, non_blocking=True), v_input.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            a_input = a_input.permute(0, 2, 1)  # B, C, T
+            v_input = v_input.permute(0, 2, 1, 3, 4)
 
             with autocast():
-                audio_output = model(v_input, a_input)
+                audio_output = model(v_input, a_input)['logits']
             predictions = audio_output.to('cpu').detach()
             predictions = torch.sigmoid(audio_output.float())
             A_predictions.append(predictions)
@@ -686,5 +700,9 @@ def validate_ft(model, val_loader, args, local_rank=0, return_ap=True):
             metrics = calculate_mAP(audio_output, target)
         else:
             metrics = calculate_acc(audio_output, target, k=1)
-
-
+        
+    if output_pred == False:
+        return metrics, loss
+    else:
+        # used for multi-frame evaluation (i.e., ensemble over frames), so return prediction and target
+        return metrics, audio_output, target
