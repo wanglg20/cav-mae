@@ -18,7 +18,8 @@ from models.mamba_pretrain import CrossMamba, UniModalMamba
 from models.videomamba_pretrain import VisionMamba
 from transformers import ClapModel, ClapProcessor
 import numpy as np
-from engine_mamba_training import train_mamba, train_uni_mamba
+from engine_mamba_training import train_mamba
+from engine_uni_mamba_training import train_uni_mamba
 
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -106,6 +107,7 @@ parser.add_argument("--train_frame_root", type=str, default='/data/wanglinge/pro
 parser.add_argument("--val_frame_root", type=str, default='/data/wanglinge/project/cav-mae/src/data/k700/val_16f', help="the root directory for validation video frames")
 parser.add_argument("--clap_path", type=str, default='/data/wanglinge/project/cav-mae/src/weight/teacher/clap.pth', help="the path to the pre-trained clap model")
 parser.add_argument("--modality", type=str, default='both', help="the modality used for training", choices=["video", "audio", "both"])
+parser.add_argument("--num_frames", type=int, default=16, help="the number of frames used for training")
 
 args = parser.parse_args()
 im_res = 224

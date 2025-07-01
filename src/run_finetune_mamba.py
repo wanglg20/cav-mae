@@ -24,8 +24,9 @@ import wandb
 import socket
 
 # borrowed model and training engine
-from models.mamba_pretrain import CrossMamba, CrossMambaFT, load_from_pretrained
+from models.mamba_pretrain import CrossMamba, CrossMambaFT, load_from_pretrained, UniModalMamba_FT
 from engine_mamba_training import finetune_mamba
+from engine_uni_mamba_training import finetune_uni_mamba
 def setup_for_distributed(is_master):
     """
     This function disables printing when not in master process
@@ -114,7 +115,10 @@ def arg_parser():
     parser.add_argument("--raw_data", type=str, default="k700", help="raw data of daataset")
     parser.add_argument("--train_frame_root", type=str, default='/data/wanglinge/project/cav-mae/src/data/k700/train_16f', help="the root directory for training video frames")
     parser.add_argument("--val_frame_root", type=str, default='/data/wanglinge/project/cav-mae/src/data/k700/val_16f', help="the root directory for validation video frames")
+    parser.add_argument("--modality", type=str, default='both', help="the modality used for training", choices=["video", "audio", "both"])
+    parser.add_argument("--num_frames", type=int, default=16, help="the number of frames used for training")
     args = parser.parse_args()
+    
     return args
 def main():
     args = arg_parser()
@@ -134,12 +138,6 @@ def main():
                     job_type="training",
                     reinit=True)
             else:
-                # wandb.init(project=args.wandb_project_name,
-                #        entity='wanglg-institude-of-automation-cas',
-                #        notes=socket.gethostname(),
-                #        name='cav_1',
-                #        job_type="training",
-                #        reinit=True)
                 os.environ["WANDB_DIR"] = "./wandb_offline"
                 wandb.init( project=args.wandb_project_name,
                    entity='wanglg-institude-of-automation-cas',
@@ -158,22 +156,36 @@ def main():
                   'noise':args.noise, 'label_smooth': args.label_smooth, 'im_res': im_res}
     val_audio_conf = {'num_mel_bins': 64, 'target_length': args.target_length, 'freqm': 0, 'timem': 0, 'mixup': 0, 'dataset': args.dataset,
                       'mode':'eval', 'mean': args.dataset_mean, 'std': args.dataset_std, 'noise': False, 'im_res': im_res}
-    model = CrossMambaFT(
-        num_classes=700, fc_drop_rate=0.1
-    )
+    
+    if args.modality == 'both':
+        model = CrossMambaFT(
+            num_classes=700, fc_drop_rate=0.1
+        )
+    elif args.modality == 'audio':
+        model = UniModalMamba_FT(
+            num_classes = 527, fc_drop_rate=0.1
+        )
+    
     missing_keys, unexpected_keys = load_from_pretrained(model, args.pretrain_path, strict=False)
     print(("newly initialized keys: ", missing_keys))
     print(("unexpected keys: ", unexpected_keys))
-
-    train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, 
-        audio_conf=audio_conf, modality='both', vision='video', raw='k700', num_frames=16,
-        use_mask=True, video_frame_dir=args.train_frame_root)
-    sampler = DistributedSampler(train_set)
-    train_loader = torch.utils.data.DataLoader(
-    train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
-    val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, num_frames=16,
+    if args.modality == 'both':
+        train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, 
+            audio_conf=audio_conf, modality='both', vision='video', raw='k700', num_frames=16,
+            use_mask=True, video_frame_dir=args.train_frame_root)
+        val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, num_frames=16,
         audio_conf=val_audio_conf, modality='both', vision='video', raw='k700', 
         use_mask=True, video_frame_dir=args.val_frame_root)
+    elif args.modality == 'audio':
+        train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, 
+            audio_conf=audio_conf, modality='both', vision='video', raw='k700', num_frames=16,
+            use_mask=True, video_frame_dir=args.train_frame_root)
+        val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, num_frames=16,
+            audio_conf=val_audio_conf, modality='both', vision='video', raw='k700', 
+            use_mask=True, video_frame_dir=args.val_frame_root)
+    sampler = DistributedSampler(train_set)
+    train_loader = torch.utils.data.DataLoader(
+        train_set, batch_size=args.batch_size, sampler=sampler, num_workers=args.num_workers, pin_memory=True, drop_last=True)
     val_sampler = DistributedSampler(val_set)
     val_loader = torch.utils.data.DataLoader(
         val_set, batch_size=10, sampler = val_sampler, shuffle=False, num_workers=args.num_workers, pin_memory=True, drop_last=True)
@@ -185,13 +197,22 @@ def main():
         pass
 
     print('Now starting training for {:d} epochs.'.format(args.n_epochs))
-    finetune_mamba(
-        model=model,
-        train_loader=train_loader,
-        test_loader=val_loader,
-        args=args,
-        local_rank=local_rank,
-    )
+    if args.modality == 'both':
+        finetune_mamba(
+            model=model,
+            train_loader=train_loader,
+            test_loader=val_loader,
+            args=args,
+            local_rank=local_rank,
+        )
+    elif args.modality == 'audio':
+         finetune_uni_mamba(
+            model=model,
+            train_loader=train_loader,
+            test_loader=val_loader,
+            args=args,
+            local_rank=local_rank,
+         )
 
 if __name__ == "__main__":
     main()

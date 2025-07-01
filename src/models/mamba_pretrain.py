@@ -988,9 +988,76 @@ class UniModalMamba(nn.Module):
             'global_features': global_feat,
         }
 
-class UniModalMamba_FT(nn.Module):
-    def __init__(self, num_classes=700, fc_drop_rate=0.1, **kwargs):
-        return
+class UniModalMamba_FT(UniModalMamba):
+    def __init__(
+        self,
+        modality='audio',
+        num_classes=700,
+        fc_drop_rate=0.,
+        **kwargs
+    ):
+        # Remove decoder-related parameters
+        clip_params_to_remove = [
+            'clip_decoder_embed_dim',
+            'clip_output_dim',
+            'clip_return_layer',
+            'clip_student_return_interval',
+            'clip_norm_type',
+        ]
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k not in clip_params_to_remove}
+
+        # Initialize base UniModalMamba (without decoder)
+        super().__init__(modality=modality, **filtered_kwargs)
+        self.return_index = []
+        self.return_index.append(self.depth - 1)  # Only return the last layer for fine-tuning
+        # Delete decoder components
+        if hasattr(self, 'decoder'):
+            del self.decoder
+        if hasattr(self, 'decoder_pos_embed'):
+            del self.decoder_pos_embed
+        # Add classification head
+        self.num_classes = num_classes
+        self.head_drop = nn.Dropout(fc_drop_rate) if fc_drop_rate > 0 else nn.Identity()
+        self.head = nn.Sequential(
+            nn.LayerNorm(self.embed_dim),
+            nn.Linear(self.embed_dim, num_classes)
+        )
+
+        self.head.apply(segm_init_weights)
+        for m in self.head.modules():
+            if isinstance(m, nn.Linear):
+                trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+
+    def forward_features(self, x: Tensor) -> Tensor:
+        # Use base forward_features without masking
+        x_vis = super().forward_features(x, mask=None)  # (K=1, B, N, D)
+        x_vis = x_vis.squeeze(0)  # B, N, D
+        return x_vis
+
+    def forward(self, x: Tensor) -> dict:
+        x_feat = self.forward_features(x)  # B, N, D
+
+        if self.use_global_pooling:
+            # Mean pooling across all tokens
+            x_global = x_feat.mean(dim=1)
+        else:
+            # Use last token as global token
+            x_global = x_feat[:, -1, :]
+
+        logits = self.head_drop(x_global)
+        logits = self.head(logits)
+
+        return {
+            'logits': logits,
+            'features': x_feat,
+            'global_feature': x_global,
+        }
+            
 
 
 

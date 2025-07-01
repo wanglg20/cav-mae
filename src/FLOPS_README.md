@@ -26,26 +26,26 @@ python test_flops.py
 
 ### 2. 单独测试特定模型
 
-使用model_pipeline.py测试特定模型：
+使用Flops_test.py测试特定模型：
 
 ```bash
 # 测试CrossMamba模型（带FLOPs计算）
-python model_pipeline.py cross_mamba
+python Flops_test.py cross_mamba
 
 # 测试CrossMambaFT模型（带FLOPs计算）
-python model_pipeline.py cross_mamba_ft
+python Flops_test.py cross_mamba_ft
 
 # 测试UniModalMamba音频模型（带FLOPs计算）
-python model_pipeline.py uni_audio
+python Flops_test.py uni_audio
 
 # 测试UniModalMamba视频模型（带FLOPs计算）
-python model_pipeline.py uni_video
+python Flops_test.py uni_video
 
 # 测试CLIP教师模型
-python model_pipeline.py clip
+python Flops_test.py clip
 
 # 测试CLAP教师模型
-python model_pipeline.py clap
+python Flops_test.py clap
 ```
 
 ## 测试的模型

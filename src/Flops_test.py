@@ -4,14 +4,14 @@ import time
 from typing import Dict, Any
 
 warnings.filterwarnings("ignore", category=FutureWarning)
-from models.mamba_pretrain import CrossMamba, CrossMambaFT, UniModalMamba
-from models.videomamba_pretrain import VisionMamba
+from models.mamba_pretrain import CrossMamba, CrossMambaFT, UniModalMamba, UniModalMamba_FT
+from models.videomamba_pretrain import VisionMamba, videomamba_middle_pretrain
 from models.teacher import clip_b16
 from dataloader import rand_mask_generate, mask_expand2d
 from transformers.models.clap.modeling_clap import ClapAudioModelOutput, ClapAudioPatchEmbed, ClapAudioStage, ClapAudioPatchMerging
 from transformers.models.clap.modeling_clap import ClapAudioModel
 from transformers import CLIPModel, CLIPProcessor, ClapModel, ClapProcessor
-
+from transformers import MambaModel, MambaConfig
 # FLOPs计算工具导入
 try:
     from thop import profile, clever_format
@@ -319,6 +319,79 @@ def test_unimodal_mamba(modality = 'audio'):
     print(f"modality {modality} forward pass successful!")
 
 
+def test_vision_mamba(Flop_test = True):
+    print("\n" + "=" * 50)
+    print("Testing VisionMamba")
+    print("=" * 50)
+    
+    num_frames = 16
+    img_size = 224
+    model = VisionMamba(
+        img_size=224,
+        patch_size=16,
+        depth=32,                       # 默认depth，实际可根据模型定义调整
+        embed_dim=768,                  # 对应clip_decoder_embed_dim
+        channels=3,
+        drop_path_rate=0.4,
+        ssm_cfg=None,
+        norm_epsilon=1e-5,
+        initializer_cfg=None,
+        fused_add_norm=True,
+        rms_norm=True,
+        residual_in_fp32=True,
+        bimamba=True,
+        kernel_size=1,
+        num_frames=16,
+        device=None,
+        dtype=None,
+        use_checkpoint=False,
+        checkpoint_num=0,
+        clip_decoder_embed_dim=768,
+        clip_output_dim=512,
+        clip_norm_type='l2',
+        clip_return_layer=1,
+        clip_student_return_interval=1,
+    )
+    #model = videomamba_middle_pretrain(num_frames=num_frames)
+    mask = torch.cat([
+        torch.ones(1, 16 * int(14 * 14 * 0.75)),
+        torch.zeros(1, 16 * int(14 * 14 * 0.25)),
+    ], dim=-1).to(torch.bool)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+    mask = mask.to(device)
+    img = torch.rand(1, 3, num_frames, img_size, img_size).to(device)
+    
+    if Flop_test:
+        n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print('Number of params: {} M'.format(n_parameters / 1e6))
+        
+        print("\nCalculating FLOPs for VisionMamba...")
+        inputs = (img, mask)
+        flops_results = {}
+        # THOP method
+        thop_results = calculate_flops_thop(model, inputs)
+        if thop_results[0] is not None:
+            flops_results['THOP'] = thop_results[:2]
+            print(f"THOP - FLOPs: {thop_results[2]}, Params: {thop_results[3]}")
+        
+        # FVCore method
+        fvcore_flops = calculate_flops_fvcore(model, inputs)
+        if fvcore_flops is not None:
+            flops_results['FVCore'] = fvcore_flops
+            print(f"FVCore - FLOPs: {fvcore_flops/1e9:.2f}G")
+        print_flops_summary("CrossMambaFT", flops_results, n_parameters)
+        # Performance benchmark
+        print("Running inference speed benchmark...")
+        avg_time, fps = benchmark_inference_speed(model, inputs, num_runs=50, warmup_runs=5)
+        print(f"Average inference time: {avg_time*1000:.2f}ms")
+        print(f"Inference FPS: {fps:.2f}")
+    
+    output = model(img, mask)
+    print(f"Output shape: {output[0].shape}")
+    print("VisionMamba forward pass successful!")
+
+
 def calculate_flops_thop(model, inputs):
     """使用thop库计算FLOPs"""
     if not THOP_AVAILABLE:
@@ -352,7 +425,7 @@ def calculate_flops_fvcore(model, inputs):
         total_flops = sum(flop_dict.values())
         return total_flops
     except Exception as e:
-        print(f"FVCore calculation failed: {e}")
+        print(f"FVCore calculation failed (likely due to Triton/JIT compatibility): {e}")
         return None
 
 
@@ -400,50 +473,39 @@ def print_flops_summary(model_name: str, flops_results: Dict[str, Any], params_c
     
     print(f"{'='*60}\n")
 
-
 def benchmark_inference_speed(model, inputs, num_runs=100, warmup_runs=10):
-    """测试模型推理速度"""
     model.eval()
     device = next(model.parameters()).device
-    
-    # 确保输入在正确的设备上
+
+    # Ensure inputs on correct device
     if isinstance(inputs, (list, tuple)):
-        inputs = [inp.to(device) if hasattr(inp, 'to') else inp for inp in inputs]
+        inputs = [x.to(device) for x in inputs]
     else:
-        inputs = inputs.to(device) if hasattr(inputs, 'to') else inputs
-    
-    # 预热
+        inputs = inputs.to(device)
+
+    # Warmup runs
     with torch.no_grad():
         for _ in range(warmup_runs):
-            try:
-                if isinstance(inputs, (list, tuple)):
-                    _ = model(*inputs)
-                else:
-                    _ = model(inputs)
-            except:
-                pass
-    
-    # 正式测试
-    torch.cuda.synchronize() if torch.cuda.is_available() else None
-    start_time = time.time()
-    
+            _ = model(*inputs) if isinstance(inputs, (list, tuple)) else model(inputs)
+
+    # Accurate timing using CUDA events
+    starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    timings = []
+
     with torch.no_grad():
         for _ in range(num_runs):
-            try:
-                if isinstance(inputs, (list, tuple)):
-                    _ = model(*inputs)
-                else:
-                    _ = model(inputs)
-            except:
-                pass
-    
-    torch.cuda.synchronize() if torch.cuda.is_available() else None
-    end_time = time.time()
-    
-    avg_time = (end_time - start_time) / num_runs
-    fps = 1.0 / avg_time
-    
-    return avg_time, fps
+            starter.record()
+            _ = model(*inputs) if isinstance(inputs, (list, tuple)) else model(inputs)
+            ender.record()
+            torch.cuda.synchronize()
+            elapsed_time_ms = starter.elapsed_time(ender)
+            timings.append(elapsed_time_ms)
+
+    avg_time_ms = sum(timings) / len(timings)
+    fps = 1000.0 / avg_time_ms
+    return avg_time_ms / 1000, fps  # Return in seconds
+
+
 
 
 def test_all_models_flops():
@@ -627,6 +689,119 @@ def test_all_models_flops():
     
     return results_summary
 
+def test_hf_mamba_model(Flop_test=True):
+    print("\n" + "=" * 50)
+    print("Testing HuggingFace MambaModel")
+    print("=" * 50)
+
+    config = MambaConfig(
+        d_model=768,
+        n_layer=8,
+        vocab_size=32000,  # required if using LM head
+        residual_in_fp32=True,
+        fused_add_norm=True,
+    )
+    model = MambaModel(config)
+
+    # 输入构造
+    B, L = 1, 1024  # batch size, sequence length
+    x = torch.randint(0, config.vocab_size, (B, L))  # token ids
+    attention_mask = torch.ones(B, L)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    x = x.to(device)
+    attention_mask = attention_mask.to(device)
+
+    # 参数量
+    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print('Number of parameters: {:.2f}M'.format(n_parameters / 1e6))
+
+    if Flop_test:
+        inputs = (x,)
+
+        flops_results = {}
+        # THOP
+        thop_results = calculate_flops_thop(model, inputs)
+        if thop_results[0] is not None:
+            flops_results['THOP'] = thop_results[:2]
+            print(f"THOP - FLOPs: {thop_results[2]}, Params: {thop_results[3]}")
+        # FVCore
+        fvcore_flops = calculate_flops_fvcore(model, inputs)
+        if fvcore_flops is not None:
+            flops_results['FVCore'] = fvcore_flops
+            print(f"FVCore - FLOPs: {fvcore_flops / 1e9:.2f}G")
+
+        print_flops_summary("HuggingFace MambaModel", flops_results, n_parameters)
+
+        # 推理速度
+        print("Running inference speed benchmark...")
+        avg_time, fps = benchmark_inference_speed(model, inputs, num_runs=50, warmup_runs=5)
+        print(f"Average inference time: {avg_time*1000:.2f} ms")
+        print(f"Inference FPS: {fps:.2f}")
+
+    # 正向传播
+    model.eval()
+    with torch.no_grad():
+        outputs = model(input_ids=x, attention_mask=attention_mask)
+    hidden_states = outputs.last_hidden_state
+    print("Output shape:", hidden_states.shape)  # (B, L, d_model)
+
+
+def test_unimodal_mambaFT(modality = 'audio', Flop_test=True):
+    print("\n" + "=" * 50)
+    print("Testing uni-modality mamba FT, current modality is: {}".format(modality))
+    print("=" * 50)
+    model_ft = UniModalMamba_FT(num_classes=527)
+    B = 2  
+    device = torch.device("cuda")
+    # Test inputs
+    v = torch.randn(B, 3, 16, 224, 224)  # Video input
+    a = torch.randn(B, 64, 1024)         # Audio input
+    model_ft = model_ft.to(device)
+    v = v.to(device)
+    a = a.to(device)
+    if modality == 'video':
+        input_x = v
+    else:
+        input_x = a
+
+    if Flop_test:
+        # 计算参数数量
+        n_parameters = sum(p.numel() for p in model_ft.parameters() if p.requires_grad)
+        print('Number of params: {} M'.format(n_parameters / 1e6))
+        
+        # 计算FLOPs
+        print("\nCalculating FLOPs for CrossMambaFT...")
+        inputs = input_x
+        
+        flops_results = {}
+        
+        # THOP method
+        thop_results = calculate_flops_thop(model_ft, inputs)
+        if thop_results[0] is not None:
+            flops_results['THOP'] = thop_results[:2]
+            print(f"THOP - FLOPs: {thop_results[2]}, Params: {thop_results[3]}")
+        
+        # FVCore method
+        fvcore_flops = calculate_flops_fvcore(model_ft, inputs)
+        if fvcore_flops is not None:
+            flops_results['FVCore'] = fvcore_flops
+            print(f"FVCore - FLOPs: {fvcore_flops/1e9:.2f}G")
+        
+        print_flops_summary("CrossMambaFT", flops_results, n_parameters)
+        
+        # 性能基准测试
+        print("Running inference speed benchmark...")
+        avg_time, fps = benchmark_inference_speed(model_ft, inputs, num_runs=50, warmup_runs=5)
+        print(f"Average inference time: {avg_time*1000:.2f}ms")
+        print(f"Inference FPS: {fps:.2f}")
+    # Test forward pass of Unimodal
+    print(f"input shape: {input_x.shape}")
+    outputs = model_ft(input_x)
+    print(f"Output Feats:", outputs['global_feature'].shape)
+    print(f"Pred logits:", outputs['logits'].shape)
+
 
 if __name__ == "__main__":
     # 选择测试模式
@@ -645,10 +820,16 @@ if __name__ == "__main__":
         test_cross_mamba()
     elif test_mode == "cross_mamba_ft":
         test_cross_mamba_ft()
-    elif test_mode == "uni_audio":
+    elif test_mode == "d":
         test_unimodal_mamba(modality='audio')
     elif test_mode == "uni_video":
         test_unimodal_mamba(modality='video')
+    elif test_mode == "vision_mamba":
+        test_vision_mamba()
+    elif test_mode == "hf_mamba":
+        test_hf_mamba_model()
+    elif test_mode == "uni_mamba_ft":
+        test_unimodal_mambaFT(modality='audio')
     elif test_mode == "flops" or test_mode == "all":
         # 运行完整的FLOPs测试
         print("For comprehensive FLOPs analysis, please run:")
@@ -658,7 +839,7 @@ if __name__ == "__main__":
     else:
         print("Available test modes:")
         print("  clip - Test CLIP teacher model")
-        print("  clap - Test CLAP teacher model") 
+        print("  clap - Test CLAP teacher model")    
         print("  cross_mamba - Test CrossMamba model")
         print("  cross_mamba_ft - Test CrossMambaFT model")
         print("  uni_audio - Test UniModalMamba (audio)")

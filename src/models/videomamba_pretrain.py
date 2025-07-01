@@ -237,7 +237,7 @@ def get_sinusoid_encoding_table(n_position, d_hid):
 
 class VisionMamba(nn.Module):
     def __init__(
-            self, 
+             self, 
             img_size=224, 
             patch_size=16, 
             depth=32, 
@@ -267,7 +267,7 @@ class VisionMamba(nn.Module):
             clip_student_return_interval=1,
         ):
         factory_kwargs = {"device": device, "dtype": dtype} # follow MambaLMHeadModel
-        super().__init__()
+        super().__init__()  
         self.residual_in_fp32 = residual_in_fp32
         self.fused_add_norm = fused_add_norm
         self.use_checkpoint = use_checkpoint
