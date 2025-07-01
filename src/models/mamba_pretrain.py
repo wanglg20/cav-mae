@@ -988,7 +988,9 @@ class UniModalMamba(nn.Module):
             'global_features': global_feat,
         }
 
-
+class UniModalMamba_FT(nn.Module):
+    def __init__(self, num_classes=700, fc_drop_rate=0.1, **kwargs):
+        return
 
 
 
