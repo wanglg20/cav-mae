@@ -470,7 +470,7 @@ if __name__ == '__main__':
     def test_audioset_dataset():
         audio_conf = {'num_mel_bins': 64, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
                   'noise':True, 'label_smooth': 0, 'im_res': 224}
-        dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/as/data/unbalanced_train_segments_valid.json', audio_conf, num_frames=16,
+        dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/as/data/eval_segments_valid.json', audio_conf, num_frames=16,
                                    label_csv='/data/wanglinge/project/cav-mae/src/data/info/as/data/as_label.csv',  modality='audioonly', 
                                    raw='audioset', use_mask=True)
         print('dataset length is {:d}'.format(len(dataset)))

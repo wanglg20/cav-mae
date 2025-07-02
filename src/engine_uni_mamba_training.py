@@ -298,7 +298,6 @@ def finetune_uni_mamba(model, train_loader, test_loader, args, local_rank):
     global_step, epoch = 0, 0
     exp_dir = args.exp_dir
 
-    # 线性探测区分 head / base 参数（如仅训练最后一层）
     probe_param_names = [k for k, v in model.named_parameters() if v.requires_grad and k.startswith('module.head')]
     base_param_names = [k for k, v in model.named_parameters() if v.requires_grad and not k.startswith('module.head')]
     probe_params = [v for k, v in model.named_parameters() if k in probe_param_names]
@@ -327,7 +326,7 @@ def finetune_uni_mamba(model, train_loader, test_loader, args, local_rank):
     scaler = GradScaler()
     epoch += 1
     print("Start finetuning...")
-
+    args.n_print_steps = 5
     while epoch <= args.n_epochs:
         train_loader.sampler.set_epoch(epoch)
         test_loader.sampler.set_epoch(epoch)
@@ -383,6 +382,7 @@ def finetune_uni_mamba(model, train_loader, test_loader, args, local_rank):
                 best_epoch = epoch
         else:
             mAP, valid_loss = validate_uni_ft(model, test_loader, args, local_rank, return_ap=True)
+            print(f"Validation mAP: {mAP:.4f}, Loss: {valid_loss:.4f}")
             if mAP > best_mAP:
                 best_mAP = mAP
                 best_epoch = epoch
@@ -391,7 +391,7 @@ def finetune_uni_mamba(model, train_loader, test_loader, args, local_rank):
             wandb.log({
                 'valid_loss': valid_loss,
                 'epoch': epoch,
-                'acc': acc if args.metrics == 'acc' else None,
+#                'acc': acc if args.metrics == 'acc' else None,
                 'mAP': mAP if args.metrics == 'mAP' else None,
             })
 
@@ -434,7 +434,7 @@ def validate_uni_ft(model, val_loader, args, local_rank=0, return_ap=False):
 
     with torch.no_grad():
         for i, (a_input, _, labels, _, _, _) in enumerate(val_loader):
-            if i > 10: break
+            #if i > 10: break
             T = args.num_frames
             B = a_input.shape[0]
             a_input = a_input.to(device, non_blocking=True).permute(0, 2, 1)

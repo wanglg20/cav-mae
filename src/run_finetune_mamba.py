@@ -178,10 +178,10 @@ def main():
         use_mask=True, video_frame_dir=args.val_frame_root)
     elif args.modality == 'audio':
         train_set = dataloader.AudiosetDataset(args.data_train, label_csv=args.label_csv, 
-            audio_conf=audio_conf, modality='both', vision='video', raw='k700', num_frames=16,
+            audio_conf=audio_conf, modality='audioonly', vision='video', raw='audioset', num_frames=16,
             use_mask=True, video_frame_dir=args.train_frame_root)
         val_set = dataloader.AudiosetDataset(args.data_val, label_csv=args.label_csv, num_frames=16,
-            audio_conf=val_audio_conf, modality='both', vision='video', raw='k700', 
+            audio_conf=val_audio_conf, modality='audioonly', vision='video', raw='audioset', 
             use_mask=True, video_frame_dir=args.val_frame_root)
     sampler = DistributedSampler(train_set)
     train_loader = torch.utils.data.DataLoader(

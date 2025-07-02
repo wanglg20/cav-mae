@@ -1,8 +1,8 @@
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 model=UniMamba
 ftmode=multi
 cur_dir=$(pwd)
-pretrain_path=/home/chenyingying/tmp/cav-mae/src/exp/audio_mamba-as2M-UniMamba-lr5e-5-bs400-p10.0-m0.75/models/model.2.pth
+pretrain_path=/home/chenyingying/tmp/cav-mae/src/exp/audio_mamba-as2M-UniMamba-lr5e-5-bs400-p10.0-m0.75/models/model.4.pth
 freeze_base=False
 head_lr=100 # newly initialized ft layers uses 100 times larger than the base lr
 bal=None
@@ -22,7 +22,7 @@ noise=False
 freqm=48
 timem=192
 mixup=0.0
-batch_size=12
+batch_size=144
 label_smooth=0.1
 
 dataset=audioset
@@ -45,11 +45,11 @@ PYTHONWARNINGS=ignore torchrun --master_port=29505 --nproc_per_node=4 ./run_fine
 --label_smooth ${label_smooth} \
 --lrscheduler_start ${lrscheduler_start} --lrscheduler_decay ${lrscheduler_decay} --lrscheduler_step ${lrscheduler_step} \
 --dataset_mean ${dataset_mean} --dataset_std ${dataset_std} --target_length ${target_length} --noise ${noise} \
---loss CE --metrics acc --warmup True \
+--loss CE --metrics mAP --warmup True \
 --wa ${wa} --wa_start ${wa_start} --wa_end ${wa_end} --lr_adapt ${lr_adapt} \
 --pretrain_path ${pretrain_path} --ftmode ${ftmode} \
 --freeze_base ${freeze_base} --head_lr ${head_lr} \
 --num-workers 4 --pooling \
 --raw_data audioset --train_frame_root ${train_frame} --val_frame_root ${val_frame} \
 --modality audio \
-# --use_wandb --wandb_run_name audio_mamba_ft_as200k \
+--use_wandb --wandb_run_name audio_mamba_ft_as200k \

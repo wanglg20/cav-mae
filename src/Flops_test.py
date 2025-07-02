@@ -5,7 +5,7 @@ from typing import Dict, Any
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 from models.mamba_pretrain import CrossMamba, CrossMambaFT, UniModalMamba, UniModalMamba_FT
-from models.videomamba_pretrain import VisionMamba, videomamba_middle_pretrain
+from models.videomamba_pretrain import VisionMamba, videomamba_middle_pretrain, create_block
 from models.teacher import clip_b16
 from dataloader import rand_mask_generate, mask_expand2d
 from transformers.models.clap.modeling_clap import ClapAudioModelOutput, ClapAudioPatchEmbed, ClapAudioStage, ClapAudioPatchMerging
@@ -34,7 +34,7 @@ except ImportError:
     print("Warning: ptflops not available.")
     PTFLOPS_AVAILABLE = False
 
-def test_cross_mamba(Flop_test = True):
+def test_cross_mamba(Flop_test = True, forward_test = True):
     print("\n" + "=" * 50)
     print("Testing CrossMamba (Pre-training)")
     model = CrossMamba(
@@ -45,7 +45,7 @@ def test_cross_mamba(Flop_test = True):
     print(model.patch_embed_v.num_patches, model.patch_embed_a.num_patches)
     
     import torch
-    B = 2
+    B = 1
     v = torch.randn(B, 3, 16, 224, 224)  # Video input
     a = torch.randn(B, 64, 1024)
     zeros = torch.zeros(16, 1).bool()
@@ -94,26 +94,26 @@ def test_cross_mamba(Flop_test = True):
         avg_time, fps = benchmark_inference_speed(model, inputs, num_runs=50, warmup_runs=5)
         print(f"Average inference time: {avg_time*1000:.2f}ms")
         print(f"Inference FPS: {fps:.2f}")
-    
-    clip_vis = model.forward_features(v, a, mask)
-    x_clip, x_clap, global_v, global_a = model(v, a, mask)
+    if forward_test:
+        clip_vis = model.forward_features(v, a, mask)
+        x_clip, x_clap, global_v, global_a = model(v, a, mask)
 
-    print("CLIP output shape:", x_clip.shape)           #1, 1, 784, 512
-    print("CLAP output shape:", x_clap.shape)           #1, 1, 64, 512
-    print("Global Video shape:", global_v.shape)         #1, 16
-    print("Global Audio shape:", global_a.shape)         #1, 16,
-    pred_clap = x_clap[:, :, ::4, :]
-    print("Pred CLAP shape:", pred_clap.shape)         #1, 1, 16, 512
-    teacher_clip = torch.randn(B, 196*16, 768).to(device)  # Simulated teacher output
-    teacher_clap = torch.randn(B, 64, 768).to(device)
-    
-    mask = mask.reshape(B, 16, -1)
-    mask_v = mask_v.reshape(B, -1)
-    mask_a = mask_a_ori.reshape(B, -1)
-    target_clip = teacher_clip[~mask_v].reshape(B, -1, 768)
-    target_clap = teacher_clap[~mask_a].reshape(B, -1, 768)
-    print("Target CLIP shape:", target_clip.shape)     # 1, 196*16, 768
-    print("Target CLAP shape:", target_clap.shape)     # 1, 16, 768
+        print("CLIP output shape:", x_clip.shape)           #1, 1, 784, 512
+        print("CLAP output shape:", x_clap.shape)           #1, 1, 64, 512
+        print("Global Video shape:", global_v.shape)         #1, 16
+        print("Global Audio shape:", global_a.shape)         #1, 16,
+        pred_clap = x_clap[:, :, ::4, :]
+        print("Pred CLAP shape:", pred_clap.shape)         #1, 1, 16, 512
+        teacher_clip = torch.randn(B, 196*16, 768).to(device)  # Simulated teacher output
+        teacher_clap = torch.randn(B, 64, 768).to(device)
+
+        mask = mask.reshape(B, 16, -1)
+        mask_v = mask_v.reshape(B, -1)
+        mask_a = mask_a_ori.reshape(B, -1)
+        target_clip = teacher_clip[~mask_v].reshape(B, -1, 768)
+        target_clap = teacher_clap[~mask_a].reshape(B, -1, 768)
+        print("Target CLIP shape:", target_clip.shape)     # 1, 196*16, 768
+        print("Target CLAP shape:", target_clap.shape)     # 1, 16, 768
 
 def test_clip_teacher():
     teacher_model = clip_b16(
@@ -155,7 +155,7 @@ def test_clap_teacher():
     
 
 
-def test_cross_mamba_ft(Flop_test = True):
+def test_cross_mamba_ft(Flop_test = True, forward_test = True):
     # Test CrossMambaFT (for fine-tuning)
     print("\n" + "=" * 50)
     print("Testing CrossMambaFT (Fine-tuning)")
@@ -224,16 +224,17 @@ def test_cross_mamba_ft(Flop_test = True):
         print(f"Inference FPS: {fps:.2f}")
     
     # Test fine-tuning model
-    print("\nTesting fine-tuning forward pass...")
-    try:
-        with torch.no_grad():
-            outputs = model_ft(v, a)
-            print(f"Video logits shape: {outputs['logits'].shape}")
-            print(f"Video features shape: {outputs['feat_v'].shape}")
-            print(f"Audio features shape: {outputs['feat_a'].shape}")
-            print("Fine-tuning forward pass successful!")
-    except Exception as e:
-        print(f"Fine-tuning forward pass failed: {e}")
+    if forward_test:
+        print("\nTesting fine-tuning forward pass...")
+        try:
+            with torch.no_grad():
+                outputs = model_ft(v, a)
+                print(f"Video logits shape: {outputs['logits'].shape}")
+                print(f"Video features shape: {outputs['feat_v'].shape}")
+                print(f"Audio features shape: {outputs['feat_a'].shape}")
+                print("Fine-tuning forward pass successful!")
+        except Exception as e:
+            print(f"Fine-tuning forward pass failed: {e}")
 
 
 def test_unimodal_mamba(modality = 'audio'):
@@ -242,7 +243,7 @@ def test_unimodal_mamba(modality = 'audio'):
     print("=" * 50)
     model = UniModalMamba()
     device = torch.device("cuda")
-    B = 2  
+    B = 1  
     # Test inputs
     v = torch.randn(B, 3, 16, 224, 224)  # Video input
     a = torch.randn(B, 64, 1024)         # Audio input
@@ -753,7 +754,7 @@ def test_unimodal_mambaFT(modality = 'audio', Flop_test=True):
     print("Testing uni-modality mamba FT, current modality is: {}".format(modality))
     print("=" * 50)
     model_ft = UniModalMamba_FT(num_classes=527)
-    B = 2  
+    B = 1  
     device = torch.device("cuda")
     # Test inputs
     v = torch.randn(B, 3, 16, 224, 224)  # Video input
@@ -803,47 +804,54 @@ def test_unimodal_mambaFT(modality = 'audio', Flop_test=True):
     print(f"Pred logits:", outputs['logits'].shape)
 
 
+def test_mamba_block(empty_block = False):
+    block = create_block(d_model=768, empyt_block=True)
+    print("Flops test for MambaBlock:")
+    
+
 if __name__ == "__main__":
-    # 选择测试模式
-    import sys
+    test_cross_mamba_ft(Flop_test=True, forward_test=False)
+    #test_vision_mamba(Flop_test=True)
+    # # 选择测试模式
+    # import sys
     
-    if len(sys.argv) > 1:
-        test_mode = sys.argv[1]
-    else:
-        test_mode = "flops"  # 默认测试FLOPs
+    # if len(sys.argv) > 1:
+    #     test_mode = sys.argv[1]
+    # else:
+    #     test_mode = "flops"  # 默认测试FLOPs
     
-    if test_mode == "clip":
-        test_clip_teacher()
-    elif test_mode == "clap":
-        test_clap_teacher()
-    elif test_mode == "cross_mamba":
-        test_cross_mamba()
-    elif test_mode == "cross_mamba_ft":
-        test_cross_mamba_ft()
-    elif test_mode == "d":
-        test_unimodal_mamba(modality='audio')
-    elif test_mode == "uni_video":
-        test_unimodal_mamba(modality='video')
-    elif test_mode == "vision_mamba":
-        test_vision_mamba()
-    elif test_mode == "hf_mamba":
-        test_hf_mamba_model()
-    elif test_mode == "uni_mamba_ft":
-        test_unimodal_mambaFT(modality='audio')
-    elif test_mode == "flops" or test_mode == "all":
-        # 运行完整的FLOPs测试
-        print("For comprehensive FLOPs analysis, please run:")
-        print("python test_flops.py")
-        print("\nOr run individual model tests with FLOPs analysis:")
-        test_cross_mamba()
-    else:
-        print("Available test modes:")
-        print("  clip - Test CLIP teacher model")
-        print("  clap - Test CLAP teacher model")    
-        print("  cross_mamba - Test CrossMamba model")
-        print("  cross_mamba_ft - Test CrossMambaFT model")
-        print("  uni_audio - Test UniModalMamba (audio)")
-        print("  uni_video - Test UniModalMamba (video)")
-        print("  flops/all - Show FLOPs test instructions")
-        print("\nUsage: python model_pipeline.py [test_mode]")
-        print("For comprehensive FLOPs analysis: python test_flops.py")
+    # if test_mode == "clip":
+    #     test_clip_teacher()
+    # elif test_mode == "clap":
+    #     test_clap_teacher()
+    # elif test_mode == "cross_mamba":
+    #     test_cross_mamba()
+    # elif test_mode == "cross_mamba_ft":
+    #     test_cross_mamba_ft()
+    # elif test_mode == "d":
+    #     test_unimodal_mamba(modality='audio')
+    # elif test_mode == "uni_video":
+    #     test_unimodal_mamba(modality='video')
+    # elif test_mode == "vision_mamba":
+    #     test_vision_mamba()
+    # elif test_mode == "hf_mamba":
+    #     test_hf_mamba_model()
+    # elif test_mode == "uni_mamba_ft":
+    #     test_unimodal_mambaFT(modality='audio')
+    # elif test_mode == "flops" or test_mode == "all":
+    #     # 运行完整的FLOPs测试
+    #     print("For comprehensive FLOPs analysis, please run:")
+    #     print("python test_flops.py")
+    #     print("\nOr run individual model tests with FLOPs analysis:")
+    #     test_cross_mamba()
+    # else:
+    #     print("Available test modes:")
+    #     print("  clip - Test CLIP teacher model")
+    #     print("  clap - Test CLAP teacher model")    
+    #     print("  cross_mamba - Test CrossMamba model")
+    #     print("  cross_mamba_ft - Test CrossMambaFT model")
+    #     print("  uni_audio - Test UniModalMamba (audio)")
+    #     print("  uni_video - Test UniModalMamba (video)")
+    #     print("  flops/all - Show FLOPs test instructions")
+    #     print("\nUsage: python model_pipeline.py [test_mode]")
+    #     print("For comprehensive FLOPs analysis: python test_flops.py")

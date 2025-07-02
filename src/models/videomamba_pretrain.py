@@ -102,11 +102,15 @@ def create_block(
     bimamba=True,
     device=None,
     dtype=None,
+    empyt_block=False,  # For testing purposes, if Set to True, replace mixer_cls with nn.Identity
 ):
     factory_kwargs = {"device": device, "dtype": dtype}
     if ssm_cfg is None:
         ssm_cfg = {}
-    mixer_cls = partial(Mamba, layer_idx=layer_idx, bimamba=bimamba, **ssm_cfg, **factory_kwargs)
+    if empyt_block:
+        mixer_cls = nn.Identity
+    else:
+        mixer_cls = partial(Mamba, layer_idx=layer_idx, bimamba=bimamba, **ssm_cfg, **factory_kwargs)
     norm_cls = partial(nn.LayerNorm if not rms_norm else RMSNorm, eps=norm_epsilon)
     block = Block(
         d_model,
@@ -396,9 +400,9 @@ class VisionMamba(nn.Module):
                     use_checkpoint=True
                 )
             else:
-                hidden_states, residual = layer(
+                hidden_states, residual = layer(        
                     hidden_states, residual, inference_params=None
-                )
+                )       # B, 784, 768
             if (idx - 1) in self.return_index:
                 x_clip_vis.append(self.norm(residual.to(dtype=self.norm.weight.dtype))) # share norm for mask
 
@@ -473,7 +477,6 @@ if __name__ == '__main__':
     torch.cuda.manual_seed_all(seed)
     num_frames = 8
     img_size = 224
-    
     model = videomamba_middle_pretrain(num_frames=num_frames).cuda()
     mask = torch.cat([
         torch.ones(1, 8 * int(14 * 14 * 0.75)),
