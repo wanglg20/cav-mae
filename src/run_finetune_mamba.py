@@ -98,7 +98,6 @@ def arg_parser():
     parser.add_argument("--ftmode", type=str, default='multimodal', help="how to fine-tune the model")
 
     parser.add_argument("--head_lr", type=float, default=50.0, help="learning rate ratio the newly initialized layers / pretrained weights")
-    parser.add_argument('--freeze_base', help='freeze the backbone or not', type=ast.literal_eval)
     parser.add_argument('--skip_frame_agg', help='if do frame agg', type=ast.literal_eval)
 
     parser.add_argument("--visible_gpus", type=str, default='0,1,2,3,4,5,6,7')
@@ -117,6 +116,7 @@ def arg_parser():
     parser.add_argument("--val_frame_root", type=str, default='/data/wanglinge/project/cav-mae/src/data/k700/val_16f', help="the root directory for validation video frames")
     parser.add_argument("--modality", type=str, default='both', help="the modality used for training", choices=["video", "audio", "both"])
     parser.add_argument("--num_frames", type=int, default=16, help="the number of frames used for training")
+    parser.add_argument("--freeze_base", help='freeze the backbone or not', type=ast.literal_eval, default=False)
     args = parser.parse_args()
     
     return args
@@ -126,6 +126,11 @@ def main():
     # Distributed training setup And Wandb Setup
     if args.use_wandb and local_rank == 0:
             print("init wandb")
+            # 强制设置离线模式环境变量
+            os.environ["WANDB_MODE"] = "offline"
+            os.environ["WANDB_DIR"] = "./wandb_offline"
+            os.environ["WANDB_DISABLE_SERVICE"] = "true"
+            
             if args.wandb_id != None:
                 args.resume = True
                 print("resuming wandb run with id: ", args.wandb_id)
@@ -133,21 +138,19 @@ def main():
                     entity='wanglg-institude-of-automation-cas',
                     notes=socket.gethostname(),
                     id=args.wandb_id,
-                    name=args.wandb_run_name,
-                    resume="must",
+                    name=args.wandb_run_name or 'cav_1',
+                    resume="allow",
                     job_type="training",
-                    reinit=True)
+                    settings=wandb.Settings(start_method="fork"),
+                    mode="offline" )
             else:
-                os.environ["WANDB_DIR"] = "./wandb_offline"
                 wandb.init( project=args.wandb_project_name,
                    entity='wanglg-institude-of-automation-cas',
                    notes=socket.gethostname(),
-                   name='cav_1',
+                   name=args.wandb_run_name or 'cav_1',
                    job_type="training",
-                   reinit=True,
+                   settings=wandb.Settings(start_method="fork"),
                    mode="offline" )
-            if args.wandb_run_name != None:
-                wandb.run.name = args.wandb_run_name
             wandb.config.update(args)
 
     im_res = 224

@@ -466,7 +466,15 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
     device = torch.device(f'cuda:{local_rank}')
     model = model.to(device)
     model.train()
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+    
+    # Use find_unused_parameters=True when freezing parameters to handle unused parameters
+    find_unused_params = args.freeze_base if hasattr(args, 'freeze_base') else False
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=find_unused_params)
+    
+    if local_rank == 0:
+        print(f"DDP initialized with find_unused_parameters={find_unused_params}")
+        if find_unused_params:
+            print("Note: find_unused_parameters=True may impact performance but is necessary when freezing parameters.")
 
     torch.set_grad_enabled(True)
     batch_time, per_sample_time, data_time, per_sample_data_time, loss_meter, per_sample_dnn_time = AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter(), AverageMeter()
@@ -488,16 +496,49 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
     
     # Create parameter lists by matching names to actual parameters
     probe_params = [v for k, v in model.named_parameters() if v.requires_grad and k.startswith('module.head')]
-    base_params = [v for k, v in model.named_parameters() if v.requires_grad and not k.startswith('module.head')]
+    base_params = [v for k, v in model.named_parameters() if v.requires_grad and not k.startswith('module.head')]    # Freeze parameters if needed
+    if args.freeze_base:
+        print("Freezing base parameters...")
+        for param in base_params:
+            param.requires_grad = False
+        print(f"Frozen {len(base_params)} base parameters")
+        
+        # Debug: Verify parameter freezing
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        frozen_params = total_params - trainable_params
+        print(f"Parameter status: Total={total_params/1e6:.3f}M, Trainable={trainable_params/1e6:.3f}M, Frozen={frozen_params/1e6:.3f}M")
+    else:
+        print("Base parameters remain trainable")
     
+    # Setup optimizer based on freeze_base setting
+    if args.freeze_base:
+        optimizer = torch.optim.Adam(
+            [{'params': probe_params, 'lr': args.lr * args.head_lr}], 
+            weight_decay=5e-7, betas=(0.95, 0.999)
+        )
+        print(f'Only optimizing probe parameters: {sum(p.numel() for p in probe_params) / 1e6:.3f} M')
+        # For frozen base, only one parameter group exists
+        mlp_lr = optimizer.param_groups[0]['lr']
+        base_lr = 0.0  # Base parameters are frozen
+        print(f'base lr (frozen): {base_lr}, mlp lr: {mlp_lr}')
+    else:
+        optimizer = torch.optim.Adam(
+            [{'params': base_params, 'lr': args.lr}, 
+            {'params': probe_params, 'lr': args.lr * args.head_lr}], 
+            weight_decay=5e-7, betas=(0.95, 0.999)
+        )
+        base_lr = optimizer.param_groups[0]['lr']
+        mlp_lr = optimizer.param_groups[1]['lr']
+        print(f'base lr: {base_lr}, mlp lr: {mlp_lr}')
+        print(f'Optimizing all parameters: base {sum(p.numel() for p in base_params) / 1e6:.3f} M + probe {sum(p.numel() for p in probe_params) / 1e6:.3f} M')
+
+    trainable_base_params = [p for p in base_params if p.requires_grad]
     
     print('Total parameter number is : {:.3f} M'.format(sum(p.numel() for p in model.parameters()) / 1e6))
     print('Probe parameter number is : {:.3f} M'.format(sum(p.numel() for p in probe_params) / 1e6))  
     print('Base parameter number is : {:.3f} M'.format(sum(p.numel() for p in base_params) / 1e6))
-    optimizer = torch.optim.Adam([{'params':  base_params, 'lr': args.lr}, {'params': probe_params, 'lr': args.lr * args.head_lr}], weight_decay=5e-7, betas=(0.95, 0.999))
-    base_lr = optimizer.param_groups[0]['lr']
-    mlp_lr = optimizer.param_groups[1]['lr']
-    print('base lr, mlp lr : ', base_lr, mlp_lr)
+    
     # Learning rate scheduler selection strategy:
     # Recommendation: Use ReduceLROnPlateau for initial experiments to find good decay points,
     # then switch to MultiStepLR with fixed milestones for final reproducible results
@@ -519,7 +560,9 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
         loss_fn = nn.CrossEntropyLoss()
     args.loss_fn = loss_fn
     print('now training with {:s}, main metrics: {:s}, loss function: {:s}, learning rate scheduler: {:s}'.format(str(args.dataset), str(main_metrics), str(loss_fn), str(scheduler)))
-
+    if args.resume:
+        epoch = resume_training(model, optimizer=optimizer, exp_dir=args.exp_dir, device=device)
+        global_step = (epoch) * len(train_loader)
     epoch += 1
     scaler = GradScaler()
 
@@ -558,14 +601,19 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
 
             grad_norm = calculate_grad_norm(model)
             if args.use_wandb and local_rank == 0:
-                wandb.log({
+                log_dict = {
                     'FT-training loss': loss.item(),
-                    'grad_norm':grad_norm,
+                    'grad_norm': grad_norm,
                     'iters': (epoch - 1) * len(train_loader) + i,
                     'epoch': epoch,
                     'lr': optimizer.param_groups[0]['lr'],
-                    'mlp_lr': optimizer.param_groups[1]['lr'],
-                })
+                }
+                # Only log mlp_lr if we have multiple parameter groups
+                if len(optimizer.param_groups) > 1:
+                    log_dict['mlp_lr'] = optimizer.param_groups[1]['lr']
+                else:
+                    log_dict['mlp_lr'] = optimizer.param_groups[0]['lr']  # Same as lr when only one group
+                wandb.log(log_dict)
             loss_meter.update(loss.item(), B)
             batch_time.update(time.time() - end_time)
             per_sample_time.update((time.time() - end_time)/a_input.shape[0])
@@ -596,6 +644,10 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
 
         print('start validation')
 
+        # Initialize variables to avoid NameError
+        acc = None
+        mAP = None
+        
         if args.raw_data == 'k700':
             acc, valid_loss =  validate_ft(model, test_loader, args, local_rank=local_rank)
             print("acc: {:.6f}".format(acc))
@@ -613,12 +665,15 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
         print("valid_loss: {:.6f}".format(valid_loss))
         print('validation finished')
         if args.use_wandb and local_rank == 0:
-                wandb.log({
-                    'valid_loss': valid_loss,
-                    'epoch': epoch,
-                    #'mAP': mAP if main_metrics == 'mAP' else None,
-                    'acc': acc if main_metrics == 'acc' else None,
-                })
+            log_dict = {
+                'valid_loss': valid_loss,
+                'epoch': epoch,
+            }
+            if acc is not None:
+                log_dict['acc'] = acc
+            if mAP is not None:
+                log_dict['mAP'] = mAP
+            wandb.log(log_dict)
 
         if best_epoch == epoch:
             torch.save(model.state_dict(), "%s/models/best_model.pth" % (exp_dir))
@@ -628,11 +683,13 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
             torch.save(model.state_dict(), "%s/models/model.%d.pth" % (exp_dir, epoch))
 
         if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            if main_metrics == 'mAP':
+            if main_metrics == 'mAP' and mAP is not None:
                 scheduler.step(mAP)
-                
-            elif main_metrics == 'acc':
+            elif main_metrics == 'acc' and acc is not None:
                 scheduler.step(acc)
+            else:
+                # Fallback to validation loss if the expected metric is not available
+                scheduler.step(valid_loss)
         else:
             scheduler.step()
 

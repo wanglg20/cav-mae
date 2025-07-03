@@ -18,7 +18,7 @@ batch_size=50
 lr_adapt=False
 dataset=audioset
 tr_data=/data/wanglinge/project/cav-mae/src/data/info/k700/k700_train_valid.json
-te_data=/data/wanglinge/project/cav-mae/src/data/info/k700/k700_train_valid.json
+te_data=/data/wanglinge/project/cav-mae/src/data/info/k700/k700_val_valid.json
 label_csv=/data/wanglinge/project/cav-mae/src/data/info/k700/k700_class.csv
 cd /data/wanglinge/project/cav-mae/src
 clap_path=/data/wanglinge/project/cav-mae/src/weight/teacher/clap.pth

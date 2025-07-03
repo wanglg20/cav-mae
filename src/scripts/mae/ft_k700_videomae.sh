@@ -6,7 +6,7 @@ ftmode=multi
 # you can replace with any checkpoint you want, but by default, we use cav-mae-scale++
 cur_dir=$(pwd)
 pretrain_path=/data/wanglinge/project/cav-mae/src/exp/pretrain-videomae-audioset-cav-mae-lr5e-5-bs6-normFalse-c0.01-p1.0-tpFalse-mr-unstructured-0.75/models/audio_model.20.pth
-freeze_base=False
+freeze_base=True
 head_lr=100 # newly initialized ft layers uses 100 times larger than the base lr
 
 bal=None
@@ -53,4 +53,4 @@ PYTHONWARNINGS=ignore torchrun --master_port=29505 --nproc_per_node=7 run_cavmae
 --num-workers 4 --pooling --use_dist True \
 --raw_data k700 \
 --use_video \
---use_wandb --wandb_run_name videomae_ft_k700
+--use_wandb --wandb_run_name videomae_ft_k700 
