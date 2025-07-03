@@ -26,7 +26,7 @@ noise=False
 freqm=48
 timem=192
 mixup=0.0
-batch_size=12
+batch_size=128
 label_smooth=0.1
 
 dataset=k700

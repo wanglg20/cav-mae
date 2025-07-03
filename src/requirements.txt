@@ -6,3 +6,7 @@ numpy
 thop
 fvcore
 ptflops
+h5py
+tqdm
+transformers
+pillow
