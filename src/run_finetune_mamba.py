@@ -122,6 +122,7 @@ def arg_parser():
     return args
 def main():
     args = arg_parser()
+    print(args.wandb_id)
     local_rank = setup_distributed(args.visible_gpus)
     # Distributed training setup And Wandb Setup
     if args.use_wandb and local_rank == 0:

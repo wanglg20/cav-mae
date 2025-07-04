@@ -450,9 +450,19 @@ if __name__ == '__main__':
     def test_k700_dataset():
         audio_conf = {'num_mel_bins': 64, 'target_length': 1024, 'freqm': 0, 'timem': 0, 'mixup': 0.0, 'dataset': 'audioset', 'mode':'train', 'mean':-5.081, 'std':4.4849,
                   'noise':True, 'label_smooth': 0, 'im_res': 224}
-        dataset = AudiosetDataset('/data/wanglinge/project/cav-mae/src/data/info/k700/k700_train_valid.json', audio_conf, num_frames=16,
-                                   label_csv='/data/wanglinge/project/cav-mae/src/data/info/k700/k700_class.csv',  modality='both', 
-                                   raw='k700', vision='video', use_mask=True, video_frame_dir='/data/wanglinge/dataset/k700/frames_16')
+
+        server_208 = True
+        if server_208:
+            path = '/data/wanglinge/project/cav-mae/src/data/info/k700_train.json'
+            label = '/data/wanglinge/project/cav-mae/src/data/info/k700_class.csv'
+            frame_dir = '/data/wanglinge/project/cav-mae/src/data/k700/train_16f'
+        else:
+            path = '/data/wanglinge/project/cav-mae/src/data/info/k700/k700_train_valid.json'
+            label = '/data/wanglinge/project/cav-mae/src/data/info/k700/k700_class.csv'
+            frame_dir = '/data/wanglinge/dataset/k700/frames_16'
+        dataset = AudiosetDataset(path, audio_conf, num_frames=16,
+                                   label_csv=label,  modality='both', 
+                                   raw='k700', vision='video', use_mask=True, video_frame_dir=frame_dir)
         print('dataset length is {:d}'.format(len(dataset)))
         loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
         for i, (fbank, image, label_indices, mask, mask_v, mask_a) in enumerate(loader):
@@ -485,4 +495,5 @@ if __name__ == '__main__':
             if i > 1:
                 break
     
-    test_audioset_dataset()
+    #test_audioset_dataset()
+    test_k700_dataset()

@@ -562,6 +562,7 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
     print('now training with {:s}, main metrics: {:s}, loss function: {:s}, learning rate scheduler: {:s}'.format(str(args.dataset), str(main_metrics), str(loss_fn), str(scheduler)))
     if args.resume:
         epoch = resume_training(model, optimizer=optimizer, exp_dir=args.exp_dir, device=device)
+        
         global_step = (epoch) * len(train_loader)
     epoch += 1
     scaler = GradScaler()
@@ -619,7 +620,7 @@ def finetune_mamba(model, train_loader, test_loader, args, local_rank):
             per_sample_time.update((time.time() - end_time)/a_input.shape[0])
             per_sample_dnn_time.update((time.time() - dnn_start_time)/a_input.shape[0])
 
-            args.n_print_steps = 100
+            args.n_print_steps = 1
             print_step = global_step % args.n_print_steps == 0
             early_print_step = epoch == 0 and global_step % (args.n_print_steps) == 0
             print_step = print_step or early_print_step
