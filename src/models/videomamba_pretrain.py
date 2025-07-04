@@ -83,7 +83,8 @@ class Block(nn.Module):
         if use_checkpoint:
             hidden_states = checkpoint.checkpoint(self.mixer, hidden_states, inference_params)
         else:
-            hidden_states = self.mixer(hidden_states, inference_params=inference_params)
+            #hidden_states = self.mixer(hidden_states, inference_params=inference_params)
+            hidden_states = self.mixer(hidden_states)
         return hidden_states, residual
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):

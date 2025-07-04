@@ -12,6 +12,7 @@ from transformers.models.clap.modeling_clap import ClapAudioModelOutput, ClapAud
 from transformers.models.clap.modeling_clap import ClapAudioModel
 from transformers import CLIPModel, CLIPProcessor, ClapModel, ClapProcessor
 from transformers import MambaModel, MambaConfig
+from models.cav_mae import Block as  AttnBlock
 # FLOPs计算工具导入
 try:
     from thop import profile, clever_format
@@ -804,13 +805,46 @@ def test_unimodal_mambaFT(modality = 'audio', Flop_test=True):
     print(f"Pred logits:", outputs['logits'].shape)
 
 
-def test_mamba_block(empty_block = False):
-    block = create_block(d_model=768, empyt_block=True)
-    print("Flops test for MambaBlock:")
-    
+def test_block(empty_block = False, block_type = 'mamba'):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("\n" + "=" * 50)
+    if block_type == 'mamba':
+        block = create_block(d_model=768, empyt_block=empty_block)
+        print("Using MambaBlock with empty_block =", empty_block)
+    elif block_type == 'attn':
+        block = AttnBlock(dim=768, num_heads=12)
+        print("Using AttnBlock")
+    else:
+        raise ValueError("Unsupported block type. Use 'mamba' or 'attn'.")
+    print("Flops test for Block:")
+    B = 1
+    input_x = torch.randn(B, 784, 768)  # B, L, D
+    block = block.to(device)
+    input_x = input_x.to(device)
+    inputs = (input_x)
+    n_parameters = sum(p.numel() for p in block.parameters() if p.requires_grad)
+    print('Number of params: {} M'.format(n_parameters / 1e6))
+    flops_results = {}
+    thop_results = calculate_flops_thop(block, inputs)
+    if thop_results[0] is not None:
+        flops_results['THOP'] = thop_results[:2]
+        print(f"THOP - FLOPs: {thop_results[2]}, Params: {thop_results[3]}")
+    print_flops_summary("Block", flops_results, n_parameters)
+
+    # 性能基准测试
+    print("Running inference speed benchmark...")
+    avg_time, fps = benchmark_inference_speed(block, inputs, num_runs=50, warmup_runs=5)
+    print(f"Average inference time: {avg_time*1000:.2f}ms")
+    print(f"Inference FPS: {fps:.2f}")
+
+
 
 if __name__ == "__main__":
-    test_cross_mamba_ft(Flop_test=True, forward_test=False)
+    #test_vision_mamba(Flop_test=True)
+    test_block(empty_block=False, block_type='attn')
+    test_block(empty_block=True, block_type='mamba')
+    test_block(empty_block=False, block_type='mamba')
+
     #test_vision_mamba(Flop_test=True)
     # # 选择测试模式
     # import sys
